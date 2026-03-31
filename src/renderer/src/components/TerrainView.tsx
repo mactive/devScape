@@ -1,292 +1,374 @@
 /**
- * TerrainView — Mountain Range Topology
+ * TerrainView — Date × Hour grid with per-project mountain peaks
  *
- * Visual metaphor:
- *  - Each project = one Gaussian mountain peak
- *  - Peak height   = log(total prompts) → depth of work
- *  - Base width    = grows with session count (longer history = wider footprint)
- *  - Contour rings = one ring per prompt/conversation turn (equi-height spacing)
- *  - X axis        = time (oldest left, newest right)
- *  - Z axis        = 4 staggered rows for connected range feel
+ * Coordinate system:
+ *   X axis  = calendar date  (left = oldest session, right = most recent)
+ *   Z axis  = hour of day    (front/−Z = 0h midnight, back/+Z = 24h midnight)
+ *   Y axis  = height         (up = more prompt turns)
+ *
+ * Each project's mountain origin = datetime of its very first session
+ * Contour rings: one ring per conversation prompt (capped at MAX_RINGS)
+ * Sigma is kept tight so bases don't bleed into each other
  */
 
-import { useRef, useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { OrbitControls, Billboard, Text, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '../store'
 import type { Session, ProjectStats } from '../types'
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// ── World constants ───────────────────────────────────────────────────────────
 
-const WORLD_W    = 52    // world-space width  (X = time axis)
-const WORLD_D    = 30    // world-space depth  (Z = stagger)
-const HFIELD     = 110   // height-field resolution for terrain computation
-const DISP_GRID  = 44    // display mesh subdivision (lower = more visible wires)
-const MAX_H      = 7     // max mountain height
-const MAX_MOUNTS = 22    // number of mountains shown
-const MAX_RINGS  = 60    // ring cap per mountain (avoid drawing thousands of rings)
+const WW       = 60     // world width  (X = date axis)
+const WD       = 32     // world depth  (Z = hour axis)
+const X_USE    = 0.88   // fraction of WW used for data range
+const Z_USE    = 0.88   // fraction of WD used for 0-24h
+const HFIELD   = 120    // height-field resolution
+const DISP     = 50     // display wireframe mesh resolution
+const MAX_H    = 7      // max mountain height
+const MAX_MT   = 24     // max mountains drawn
+const MAX_RINGS = 55    // ring cap per mountain
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Date / hour helpers ───────────────────────────────────────────────────────
 
-interface Mountain {
-  name:         string
-  worldX:       number
-  worldZ:       number
-  peakHeight:   number
-  sigma:        number    // Gaussian spread in world units
-  sessionCount: number
-  promptCount:  number    // determines how many contour rings
-  age:          number    // 0 = newest, 1 = oldest
+interface DateRange {
+  minDate: Date
+  maxDate: Date
+  daySpan: number
 }
 
-// ── Layout ───────────────────────────────────────────────────────────────────
+function getDateRange(sessions: Session[]): DateRange {
+  if (!sessions.length) {
+    const now = new Date()
+    const ago = new Date(now.getTime() - 90 * 86_400_000)
+    return { minDate: ago, maxDate: now, daySpan: 90 }
+  }
+  const ts  = sessions.map(s => new Date(s.startTime).getTime())
+  const min = new Date(Math.min(...ts)); min.setHours(0, 0, 0, 0)
+  const max = new Date(Math.max(...ts)); max.setHours(23, 59, 59, 999)
+  return { minDate: min, maxDate: max,
+           daySpan: Math.max(1, Math.ceil((max.getTime() - min.getTime()) / 86_400_000)) }
+}
 
-function buildMountains(projects: ProjectStats[], sessions: Session[]): Mountain[] {
-  if (projects.length === 0) return []
+function toWorldX(date: Date, r: DateRange): number {
+  const t = (date.getTime() - r.minDate.getTime()) /
+            (r.maxDate.getTime() - r.minDate.getTime())
+  return (t - 0.5) * WW * X_USE
+}
 
-  const byProject = new Map<string, Session[]>()
+function toWorldZ(hour: number): number {
+  return ((hour / 24) - 0.5) * WD * Z_USE
+}
+
+// ── Mountain type ─────────────────────────────────────────────────────────────
+
+interface Mountain {
+  name:        string
+  worldX:      number
+  worldZ:      number
+  peakHeight:  number
+  sigma:       number
+  promptCount: number
+  sessionCount: number
+  age:         number   // 0=newest, 1=oldest
+}
+
+// ── Layout ────────────────────────────────────────────────────────────────────
+
+function buildMountains(
+  projects: ProjectStats[],
+  sessions: Session[],
+  dr: DateRange
+): Mountain[] {
+  if (!projects.length) return []
+
+  // Find first session datetime per project
+  const firstTime = new Map<string, number>()
   for (const s of sessions) {
-    const arr = byProject.get(s.projectName) ?? []
-    arr.push(s)
-    byProject.set(s.projectName, arr)
+    const t = new Date(s.startTime).getTime()
+    const cur = firstTime.get(s.projectName) ?? Infinity
+    if (t < cur) firstTime.set(s.projectName, t)
   }
 
-  const lastActive = (name: string): number => {
-    const arr = byProject.get(name)
-    if (!arr?.length) return 0
-    return Math.max(...arr.map(s => new Date(s.startTime).getTime()))
-  }
+  const topProjects = [...projects]
+    .filter(p => firstTime.has(p.name))
+    .sort((a, b) => (firstTime.get(a.name)! - firstTime.get(b.name)!))
+    .slice(0, MAX_MT)
 
-  const sorted = projects
-    .slice(0, MAX_MOUNTS)
-    .sort((a, b) => lastActive(a.name) - lastActive(b.name))  // oldest → left
-
-  const times  = sorted.map(p => lastActive(p.name))
-  const minT   = times[0]  ?? 0
-  const maxT   = times[times.length - 1] ?? 1
+  const times = topProjects.map(p => firstTime.get(p.name)!)
+  const minT  = Math.min(...times)
+  const maxT  = Math.max(...times)
   const tRange = Math.max(maxT - minT, 1)
 
-  // Four Z rows — hex-offset for organic clustering
-  const zRows = [-10.5, -3.5, 3.5, 10.5]
+  // Sigma tight enough to prevent heavy base overlap:
+  // base at ~5% height = sigma * 2.45 → keep that under 1.5 "day widths"
+  const dayWidth = (WW * X_USE) / dr.daySpan
+  const sigma    = Math.max(0.30, Math.min(1.20, dayWidth * 1.3))
 
-  return sorted.map((p, i) => {
-    const tFrac  = (times[i] - minT) / tRange
-    // golden-ratio jitter on X so they don't line up perfectly
-    const jitter = ((i * 0.6180339887) % 1 - 0.5) * 3.5
-    const row    = i % zRows.length
-    const xOff   = row % 2 === 0 ? 0 : 2.2   // hex row offset
+  return topProjects.map(p => {
+    const t       = firstTime.get(p.name)!
+    const date    = new Date(t)
+    const hour    = date.getHours() + date.getMinutes() / 60
+    const worldX  = toWorldX(date, dr)
+    const worldZ  = toWorldZ(hour)
+    const age     = 1 - (t - minT) / tRange
 
-    const worldX = (tFrac - 0.5) * (WORLD_W * 0.82) + jitter + xOff
-    const worldZ = zRows[row] + ((i * 0.37) % 2 - 1) * 1.2
-
-    const sc     = p.sessionCount
-    const pc     = p.promptCount
-
-    const peakHeight = Math.max(0.6, (Math.log(1 + pc) / Math.log(2000)) * MAX_H)
-    const sigma      = 3.0 + Math.log(1 + sc) * 0.7
+    const peakHeight = Math.max(0.5, (Math.log(1 + p.promptCount) / Math.log(2000)) * MAX_H)
 
     return {
-      name:  p.name,
+      name:         p.name,
       worldX,
       worldZ,
       peakHeight,
       sigma,
-      sessionCount: sc,
-      promptCount:  pc,
-      age: 1 - tFrac,
+      promptCount:  p.promptCount,
+      sessionCount: p.sessionCount,
+      age,
     }
   })
 }
 
-// ── Height Field ─────────────────────────────────────────────────────────────
+// ── Height field (sum of Gaussians) ──────────────────────────────────────────
 
-function buildHeightField(mountains: Mountain[]): Float32Array {
-  const field = new Float32Array(HFIELD * HFIELD)
-  for (const m of mountains) {
-    const cx  = ((m.worldX / WORLD_W) + 0.5) * (HFIELD - 1)
-    const cz  = ((m.worldZ / WORLD_D) + 0.5) * (HFIELD - 1)
-    const sg  = (m.sigma / WORLD_W) * (HFIELD - 1)
-    const R   = Math.ceil(sg * 3.2)
-    const x0  = Math.max(0, Math.floor(cx - R)), x1 = Math.min(HFIELD - 1, Math.ceil(cx + R))
-    const z0  = Math.max(0, Math.floor(cz - R)), z1 = Math.min(HFIELD - 1, Math.ceil(cz + R))
-    for (let z = z0; z <= z1; z++)
-      for (let x = x0; x <= x1; x++) {
+function buildHeightField(mounts: Mountain[]): Float32Array {
+  const f = new Float32Array(HFIELD * HFIELD)
+  for (const m of mounts) {
+    const cx = ((m.worldX / WW) + 0.5) * (HFIELD - 1)
+    const cz = ((m.worldZ / WD) + 0.5) * (HFIELD - 1)
+    const sg = (m.sigma / WW) * (HFIELD - 1)
+    const R  = Math.ceil(sg * 3.5)
+    for (let z = Math.max(0, Math.floor(cz - R)); z <= Math.min(HFIELD-1, Math.ceil(cz+R)); z++)
+      for (let x = Math.max(0, Math.floor(cx - R)); x <= Math.min(HFIELD-1, Math.ceil(cx+R)); x++) {
         const dx = x - cx, dz = z - cz
-        field[z * HFIELD + x] += m.peakHeight * Math.exp(-(dx*dx + dz*dz) / (2*sg*sg))
+        f[z * HFIELD + x] += m.peakHeight * Math.exp(-(dx*dx + dz*dz) / (2*sg*sg))
       }
   }
-  return field
+  return f
 }
 
-function sampleField(field: Float32Array, row: number, col: number): number {
-  const r = Math.max(0, Math.min(HFIELD - 1, row))
-  const c = Math.max(0, Math.min(HFIELD - 1, col))
-  return field[r * HFIELD + c]
-}
-
-// Build geometry from field, sampled at displayGrid resolution
-function buildDisplayGeo(field: Float32Array): THREE.BufferGeometry {
-  const geo = new THREE.PlaneGeometry(WORLD_W, WORLD_D, DISP_GRID - 1, DISP_GRID - 1)
-  geo.rotateX(-Math.PI / 2)
-  const pos = geo.attributes.position.array as Float32Array
-
-  for (let row = 0; row < DISP_GRID; row++) {
-    for (let col = 0; col < DISP_GRID; col++) {
-      // bilinear sample
-      const fr  = (row / (DISP_GRID - 1)) * (HFIELD - 1)
-      const fc  = (col / (DISP_GRID - 1)) * (HFIELD - 1)
-      const r0  = Math.floor(fr), r1 = Math.min(r0 + 1, HFIELD - 1)
-      const c0  = Math.floor(fc), c1 = Math.min(c0 + 1, HFIELD - 1)
-      const tr  = fr - r0, tc = fc - c0
-      const h   = sampleField(field, r0, c0) * (1-tr) * (1-tc)
-                + sampleField(field, r1, c0) * tr    * (1-tc)
-                + sampleField(field, r0, c1) * (1-tr) * tc
-                + sampleField(field, r1, c1) * tr    * tc
-      pos[(row * DISP_GRID + col) * 3 + 1] = h
+function buildDisplayGeo(f: Float32Array): THREE.BufferGeometry {
+  const g = new THREE.PlaneGeometry(WW, WD, DISP - 1, DISP - 1)
+  g.rotateX(-Math.PI / 2)
+  const pos = g.attributes.position.array as Float32Array
+  for (let row = 0; row < DISP; row++) {
+    for (let col = 0; col < DISP; col++) {
+      const fr = (row / (DISP-1)) * (HFIELD-1), fc = (col / (DISP-1)) * (HFIELD-1)
+      const r0 = Math.min(Math.floor(fr), HFIELD-2), c0 = Math.min(Math.floor(fc), HFIELD-2)
+      const tr = fr - r0, tc = fc - c0
+      const h = f[r0*HFIELD+c0]*(1-tr)*(1-tc) + f[(r0+1)*HFIELD+c0]*tr*(1-tc)
+              + f[r0*HFIELD+c0+1]*(1-tr)*tc   + f[(r0+1)*HFIELD+c0+1]*tr*tc
+      pos[(row*DISP+col)*3+1] = h
     }
   }
-  geo.attributes.position.needsUpdate = true
-  geo.computeVertexNormals()
-  return geo
+  g.attributes.position.needsUpdate = true
+  g.computeVertexNormals()
+  return g
 }
 
-// ── Contour Data ─────────────────────────────────────────────────────────────
+// ── Contour ring data ─────────────────────────────────────────────────────────
 
-type Vec3Tuple  = [number, number, number]
+type V3 = [number, number, number]
 
-/**
- * For each mountain:
- *  N = min(promptCount, MAX_RINGS) contour rings
- *  Ring s at height h_s = (s/(N+1)) * peakHeight
- *  Radius from Gaussian inverse: r_s = sigma * sqrt(-2 * ln(h_s / H))
- *
- * Returns flat arrays of line-segment pairs (for drei <Line segments>)
- */
-function buildContourData(mountains: Mountain[]): { points: Vec3Tuple[], colors: Vec3Tuple[] } {
-  const pts: Vec3Tuple[]  = []
-  const cols: Vec3Tuple[] = []
+function buildContourData(mounts: Mountain[]): { pts: V3[], cols: V3[] } {
+  const pts: V3[] = [], cols: V3[] = []
 
-  for (const m of mountains) {
-    // One ring per prompt, capped at MAX_RINGS
+  for (const m of mounts) {
     const N = Math.min(m.promptCount, MAX_RINGS)
-    if (N === 0) continue
-
-    const H = m.peakHeight
+    if (!N) continue
     const σ = m.sigma
-
-    // Newest = bright #aaff00 → Oldest = muted #336622
-    const baseR = THREE.MathUtils.lerp(0.67, 0.20, m.age)
-    const baseG = THREE.MathUtils.lerp(1.00, 0.40, m.age)
+    const H = m.peakHeight
+    const bR = THREE.MathUtils.lerp(0.67, 0.18, m.age)
+    const bG = THREE.MathUtils.lerp(1.00, 0.38, m.age)
 
     for (let s = 1; s <= N; s++) {
-      const frac = s / (N + 1)          // evenly spaced height fractions
-      const h    = frac * H
+      const frac = s / (N + 1)
+      const h = frac * H
+      const r = σ * Math.sqrt(-2 * Math.log(frac))
+      if (!isFinite(r) || r < 0.08 || r > 18) continue
 
-      // Radius on the Gaussian at this height
-      const r = σ * Math.sqrt(-2.0 * Math.log(frac))
-      if (!isFinite(r) || r < 0.12 || r > 24) continue
+      const br = 0.28 + 0.72 * frac
+      const cr = bR * br, cg = bG * br
 
-      // Higher rings = brighter
-      const bright = 0.28 + 0.72 * frac
-      const cr = baseR * bright
-      const cg = baseG * bright
-
-      // Circle resolution: more segments for wider rings
-      const segs = Math.max(22, Math.min(60, Math.round(r * 7)))
-
+      const segs = Math.max(18, Math.min(56, Math.round(r * 8)))
       for (let i = 0; i < segs; i++) {
-        const a0 = (i       / segs) * Math.PI * 2
-        const a1 = ((i + 1) / segs) * Math.PI * 2
-        // Segment start
-        pts.push([m.worldX + r * Math.cos(a0), h, m.worldZ + r * Math.sin(a0)])
+        const a0 = (i / segs) * Math.PI * 2, a1 = ((i+1) / segs) * Math.PI * 2
+        pts.push([m.worldX + r*Math.cos(a0), h, m.worldZ + r*Math.sin(a0)])
         cols.push([cr, cg, 0])
-        // Segment end
-        pts.push([m.worldX + r * Math.cos(a1), h, m.worldZ + r * Math.sin(a1)])
+        pts.push([m.worldX + r*Math.cos(a1), h, m.worldZ + r*Math.sin(a1)])
         cols.push([cr, cg, 0])
       }
     }
   }
-
-  return { points: pts, colors: cols }
+  return { pts, cols }
 }
 
-// ── React Components ─────────────────────────────────────────────────────────
+// ── Grid geometry ─────────────────────────────────────────────────────────────
 
-/**
- * Mountain body: solid dark fill + lighter wireframe overlay.
- * Two meshes share the same geometry (built once).
- */
-function TerrainBody({ field }: { field: Float32Array }) {
-  const geo = useMemo(() => buildDisplayGeo(field), [field])
+function buildGridGeo(dr: DateRange): { major: THREE.BufferGeometry; minor: THREE.BufferGeometry } {
+  const xMin = toWorldX(dr.minDate, dr), xMax = toWorldX(dr.maxDate, dr)
+  const zMin = toWorldZ(0),              zMax = toWorldZ(24)
+
+  // Decide intervals based on day span
+  const dayStep  = dr.daySpan <= 14 ? 1 : dr.daySpan <= 60 ? 7 : dr.daySpan <= 120 ? 14 : 30
+  const hourStep = 3   // every 3h
+
+  const majorV: number[] = [], minorV: number[] = []
+
+  // Date lines (vertical, along Z)
+  for (let d = 0; d <= dr.daySpan; d++) {
+    const date = new Date(dr.minDate.getTime() + d * 86_400_000)
+    const x    = toWorldX(date, dr)
+    const isMajor = d % dayStep === 0
+    ;(isMajor ? majorV : minorV).push(x, 0, zMin, x, 0, zMax)
+  }
+
+  // Hour lines (horizontal, along X)
+  for (let h = 0; h <= 24; h++) {
+    const z = toWorldZ(h)
+    const isMajor = h % hourStep === 0
+    ;(isMajor ? majorV : minorV).push(xMin, 0, z, xMax, 0, z)
+  }
+
+  const make = (verts: number[]): THREE.BufferGeometry => {
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3))
+    return g
+  }
+  return { major: make(majorV), minor: make(minorV) }
+}
+
+// ── React components ──────────────────────────────────────────────────────────
+
+function DateTimeGrid({ dr }: { dr: DateRange }) {
+  const { major, minor } = useMemo(() => buildGridGeo(dr), [dr])
 
   return (
     <>
-      {/* Solid fill — blocks grid showing through steep flanks */}
+      {/* Minor grid: daily + every hour */}
+      <lineSegments geometry={minor}>
+        <lineBasicMaterial color={0x0a1c0a} transparent opacity={0.8} />
+      </lineSegments>
+      {/* Major grid: weekly/biweekly + every 3h */}
+      <lineSegments geometry={major}>
+        <lineBasicMaterial color={0x163016} transparent opacity={0.9} />
+      </lineSegments>
+    </>
+  )
+}
+
+/** Date labels along the front edge (z = 24h line) */
+function DateLabels({ dr }: { dr: DateRange }) {
+  const dayStep  = dr.daySpan <= 14 ? 1 : dr.daySpan <= 60 ? 7 : dr.daySpan <= 120 ? 14 : 30
+  const zFront   = toWorldZ(24) + 2.0
+  const labels: JSX.Element[] = []
+
+  for (let d = 0; d <= dr.daySpan; d += dayStep) {
+    const date = new Date(dr.minDate.getTime() + d * 86_400_000)
+    const x    = toWorldX(date, dr)
+    const label = `${date.getMonth()+1}/${date.getDate()}`
+    labels.push(
+      <Billboard key={d} position={[x, 0.05, zFront]}>
+        <Text fontSize={0.38} color="#3a6a3a" anchorX="center" anchorY="top">
+          {label}
+        </Text>
+      </Billboard>
+    )
+  }
+  return <>{labels}</>
+}
+
+/** Hour labels along the left edge (x = minDate line) */
+function HourLabels({ dr }: { dr: DateRange }) {
+  const xLeft = toWorldX(dr.minDate, dr) - 2.2
+  const labels: JSX.Element[] = []
+
+  for (let h = 0; h <= 21; h += 3) {
+    const z     = toWorldZ(h)
+    const label = `${String(h).padStart(2,'0')}h`
+    const bright = h === 0 || h === 12 ? '#55aa55' : '#2e5a2e'
+    labels.push(
+      <Billboard key={h} position={[xLeft, 0.05, z]}>
+        <Text fontSize={0.38} color={bright} anchorX="right" anchorY="middle">
+          {label}
+        </Text>
+      </Billboard>
+    )
+  }
+  return <>{labels}</>
+}
+
+/** Axis title labels */
+function AxisTitles({ dr }: { dr: DateRange }) {
+  const xMid  = 0
+  const zFront = toWorldZ(24) + 4.2
+  const xLeft  = toWorldX(dr.minDate, dr) - 4.5
+  return (
+    <>
+      <Billboard position={[xMid, 0.1, zFront]}>
+        <Text fontSize={0.45} color="#558855" anchorX="center">DATE →</Text>
+      </Billboard>
+      <Billboard position={[xLeft, 0.1, 0]}>
+        <Text fontSize={0.45} color="#558855" anchorX="center">HOUR</Text>
+      </Billboard>
+    </>
+  )
+}
+
+/** Mountain body: solid fill + wireframe overlay */
+function TerrainBody({ field }: { field: Float32Array }) {
+  const geo = useMemo(() => buildDisplayGeo(field), [field])
+  return (
+    <>
       <mesh geometry={geo}>
         <meshBasicMaterial color={0x050c05} />
       </mesh>
-      {/* Wireframe overlay — reveals mountain topology */}
       <mesh geometry={geo}>
-        <meshBasicMaterial color={0x1f421f} wireframe />
+        <meshBasicMaterial color={0x1c3e1c} wireframe />
       </mesh>
     </>
   )
 }
 
-/**
- * All contour rings across all mountains in one draw call.
- * Uses drei <Line segments lineWidth> so rings have real pixel width.
- */
-function ContourLines({ mountains }: { mountains: Mountain[] }) {
-  const groupRef = useRef<THREE.Group>(null)
-  const { points, colors } = useMemo(() => buildContourData(mountains), [mountains])
+/** All contour rings in one LineSegments2 draw call */
+function ContourLines({ mounts }: { mounts: Mountain[] }) {
+  const ref = useRef<THREE.Group>(null)
+  const { pts, cols } = useMemo(() => buildContourData(mounts), [mounts])
 
-  // Gentle whole-group breathing
   useFrame(({ clock }) => {
-    if (groupRef.current)
-      groupRef.current.position.y = Math.sin(clock.getElapsedTime() * 0.38) * 0.07
+    if (ref.current)
+      ref.current.position.y = Math.sin(clock.getElapsedTime() * 0.38) * 0.06
   })
 
-  if (points.length === 0) return null
-
+  if (!pts.length) return null
   return (
-    <group ref={groupRef}>
-      <Line
-        points={points}
-        vertexColors={colors}
-        lineWidth={2.2}
-        segments
-      />
+    <group ref={ref}>
+      <Line points={pts} vertexColors={cols} lineWidth={2.0} segments />
     </group>
   )
 }
 
-/** Billboard labels above each peak (top 12 by height) */
-function PeakLabels({ mountains }: { mountains: Mountain[] }) {
-  const top = [...mountains].sort((a, b) => b.peakHeight - a.peakHeight).slice(0, 12)
-
+/** Billboard labels above each peak */
+function PeakLabels({ mounts }: { mounts: Mountain[] }) {
+  const top = [...mounts].sort((a,b) => b.peakHeight - a.peakHeight).slice(0, 14)
   return (
     <>
       {top.map((m, i) => (
-        <Billboard key={i} position={[m.worldX, m.peakHeight + 1.2, m.worldZ]}>
+        <Billboard key={i} position={[m.worldX, m.peakHeight + 1.1, m.worldZ]}>
           <Text
-            fontSize={0.42}
-            color={m.age < 0.25 ? '#aaff00' : m.age < 0.6 ? '#77cc44' : '#446633'}
-            anchorX="center"
-            anchorY="bottom"
-            outlineWidth={0.07}
-            outlineColor="#000000"
-            maxWidth={9}
+            fontSize={0.40}
+            color={m.age < 0.3 ? '#aaff00' : m.age < 0.65 ? '#66bb33' : '#3d6626'}
+            anchorX="center" anchorY="bottom"
+            outlineWidth={0.07} outlineColor="#000"
+            maxWidth={8}
           >
             {m.name.toUpperCase().slice(0, 20)}
           </Text>
           <Text
-            fontSize={0.27}
-            color={m.age < 0.5 ? '#557733' : '#334422'}
-            anchorX="center"
-            anchorY="top"
-            position={[0, -0.05, 0]}
+            fontSize={0.26}
+            color={m.age < 0.5 ? '#557730' : '#2e4420'}
+            anchorX="center" anchorY="top"
+            position={[0, -0.04, 0]}
           >
             {`${m.promptCount}p · ${m.sessionCount}s`}
           </Text>
@@ -296,90 +378,62 @@ function PeakLabels({ mountains }: { mountains: Mountain[] }) {
   )
 }
 
-function GridFloor() {
-  return (
-    <gridHelper
-      args={[WORLD_W + 10, 28, 0x0e220e, 0x0a170a]}
-      position={[0, -0.03, 0]}
-    />
-  )
-}
-
-function TimeAxis({ mountains }: { mountains: Mountain[] }) {
-  if (mountains.length < 2) return null
-  const oldest = mountains.reduce((a, b) => a.worldX < b.worldX ? a : b)
-  const newest = mountains.reduce((a, b) => a.worldX > b.worldX ? a : b)
-  const zFront  = WORLD_D / 2 + 2.2
-  return (
-    <>
-      <Billboard position={[oldest.worldX, -0.5, zFront]}>
-        <Text fontSize={0.37} color="#335533" anchorX="center">OLDER</Text>
-      </Billboard>
-      <Billboard position={[newest.worldX, -0.5, zFront]}>
-        <Text fontSize={0.37} color="#77bb44" anchorX="center">RECENT</Text>
-      </Billboard>
-    </>
-  )
-}
-
-// ── Main Export ───────────────────────────────────────────────────────────────
+// ── Main export ───────────────────────────────────────────────────────────────
 
 export default function TerrainView(): JSX.Element {
   const { sessions, projects } = useStore()
 
-  const mountains   = useMemo(() => buildMountains(projects, sessions),  [projects, sessions])
-  const heightField = useMemo(() => buildHeightField(mountains), [mountains])
+  const dr         = useMemo(() => getDateRange(sessions), [sessions])
+  const mounts     = useMemo(() => buildMountains(projects, sessions, dr), [projects, sessions, dr])
+  const heightField = useMemo(() => buildHeightField(mounts), [mounts])
 
-  const totalRings = mountains.reduce((s, m) => s + Math.min(m.promptCount, MAX_RINGS), 0)
+  const totalRings = mounts.reduce((s, m) => s + Math.min(m.promptCount, MAX_RINGS), 0)
 
   return (
     <div className="w-full h-full bg-cyber-dark relative">
-
       <div className="absolute top-2 left-2 z-10 cyber-header text-cyber-text-dim py-1">
         ACTIVITY TERRAIN
       </div>
-      <div className="absolute top-2 right-2 z-10 text-xs font-mono text-cyber-text-dim">
-        {mountains.length} PEAKS · {totalRings} RINGS
+      <div className="absolute top-2 right-2 z-10 font-mono text-cyber-text-dim" style={{ fontSize: '10px' }}>
+        {mounts.length} PROJECTS · {totalRings} RINGS · {dr.daySpan}d SPAN
       </div>
       <div
         className="absolute bottom-2 left-2 z-10 flex items-center gap-3 font-mono"
-        style={{ fontSize: '9px', color: '#446644' }}
+        style={{ fontSize: '9px', color: '#3a6a3a' }}
       >
-        <span><span style={{ color: '#aaff00' }}>↑</span> height = prompt depth</span>
-        <span><span style={{ color: '#aaff00' }}>○</span> 1 ring = 1 conversation turn</span>
-        <span><span style={{ color: '#aaff00' }}>→</span> time: old → new</span>
+        <span><span style={{ color: '#aaff00' }}>X</span> = date created</span>
+        <span><span style={{ color: '#aaff00' }}>Z</span> = hour of day</span>
+        <span><span style={{ color: '#aaff00' }}>↑</span> = prompt depth</span>
+        <span><span style={{ color: '#aaff00' }}>○</span> 1 ring = 1 prompt</span>
       </div>
 
       <Canvas
-        camera={{ position: [8, 16, 26], fov: 44 }}
-        style={{ background: '#030803' }}
+        camera={{ position: [0, 20, 30], fov: 46 }}
+        style={{ background: '#020702' }}
         gl={{ antialias: true }}
       >
-        <TerrainBody    field={heightField} />
-        <ContourLines   mountains={mountains} />
-        <PeakLabels     mountains={mountains} />
-        <TimeAxis       mountains={mountains} />
-        <GridFloor />
+        <DateTimeGrid dr={dr} />
+        <DateLabels   dr={dr} />
+        <HourLabels   dr={dr} />
+        <AxisTitles   dr={dr} />
+        <TerrainBody  field={heightField} />
+        <ContourLines mounts={mounts} />
+        <PeakLabels   mounts={mounts} />
 
         <OrbitControls
-          enablePan
-          enableZoom
-          enableRotate
+          enablePan enableZoom enableRotate
           maxPolarAngle={Math.PI / 2 - 0.03}
-          minDistance={5}
-          maxDistance={80}
-          target={[0, 1.5, 0]}
+          minDistance={6} maxDistance={90}
+          target={[0, 1, 0]}
         />
-        <fog attach="fog" args={['#030803', 48, 100]} />
+        <fog attach="fog" args={['#020702', 50, 105]} />
       </Canvas>
 
       {sessions.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center text-cyber-text-dim">
             <p className="text-sm font-mono">NO SESSION DATA</p>
-            <p className="text-xs mt-1" style={{ fontSize: '10px' }}>
-              Ensure ~/.claude/projects/ exists
-            </p>
+            <p className="text-xs mt-1" style={{ fontSize: '10px' }}>Ensure ~/.claude/projects/ exists</p>
           </div>
         </div>
       )}
