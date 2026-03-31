@@ -20,14 +20,14 @@ import type { Session, ProjectStats } from '../types'
 
 // ── World constants ───────────────────────────────────────────────────────────
 
-const WW       = 52      // world width  (X = date)
-const WD       = 28      // world depth  (Z = hour 0-24)
-const X_USE    = 0.82
-const Z_USE    = 0.84
-const MAX_H    = 8
-const MAX_MT   = 28
-const MAX_RINGS   = 10   // contour rings per mountain
-const R_CAP_K     = 1.55 // max ring radius = R_CAP_K × sigma
+const WW = 52      // world width  (X = date)
+const WD = 28      // world depth  (Z = hour 0-24)
+const X_USE = 0.82
+const Z_USE = 0.84
+const MAX_H = 8
+const MAX_MT = 28
+const MAX_RINGS = 10   // contour rings per mountain
+const R_CAP_K = 1.55 // max ring radius = R_CAP_K × sigma
 
 // ── Date / hour math ──────────────────────────────────────────────────────────
 
@@ -38,12 +38,12 @@ function getDateRange(sessions: Session[]): DateRange {
     const now = new Date(), ago = new Date(now.getTime() - 60 * 86_400_000)
     return { minDate: ago, maxDate: now, daySpan: 60 }
   }
-  const ts   = sessions.map(s => new Date(s.startTime).getTime())
+  const ts = sessions.map(s => new Date(s.startTime).getTime())
   const minT = Math.min(...ts)
   const maxT = Math.max(...ts)
   // Axis: from actual first session (floored to day) to today
-  const min  = new Date(minT); min.setHours(0, 0, 0, 0)
-  const max  = new Date();     max.setHours(23, 59, 59, 999)
+  const min = new Date(minT); min.setHours(0, 0, 0, 0)
+  const max = new Date(); max.setHours(23, 59, 59, 999)
   const daySpan = Math.max(7, Math.ceil((max.getTime() - min.getTime()) / 86_400_000))
   return { minDate: min, maxDate: max, daySpan }
 }
@@ -86,20 +86,20 @@ function buildMountains(
 
   if (!visible.length) return []
 
-  const ts     = visible.map(p => firstTime.get(p.name)!)
-  const minT   = Math.min(...ts), maxT = Math.max(...ts)
+  const ts = visible.map(p => firstTime.get(p.name)!)
+  const minT = Math.min(...ts), maxT = Math.max(...ts)
   const tRange = Math.max(maxT - minT, 1)
 
   // Sigma base adapts to date range span
-  const dayWidth  = (WW * X_USE) / dr.daySpan
+  const dayWidth = (WW * X_USE) / dr.daySpan
   const sigmaBase = Math.max(1.6, Math.min(3.2, dayWidth * 3.8))
 
   // Normalize prompt counts for sigma scaling
   const maxPc = Math.max(...visible.map(p => p.promptCount), 1)
 
   return visible.map(p => {
-    const t    = firstTime.get(p.name)!
-    const d    = new Date(t)
+    const t = firstTime.get(p.name)!
+    const d = new Date(t)
     const hour = d.getHours() + d.getMinutes() / 60
     const norm = p.promptCount / maxPc   // 0..1
 
@@ -108,14 +108,14 @@ function buildMountains(
     const sigma = sigmaBase * (1 - 0.55 * norm)
 
     return {
-      name:         p.name,
-      worldX:       toWorldX(d, dr),
-      worldZ:       toWorldZ(hour),
-      peakHeight:   Math.max(0.6, (Math.log(1 + p.promptCount) / Math.log(1500)) * MAX_H),
+      name: p.name,
+      worldX: toWorldX(d, dr),
+      worldZ: toWorldZ(hour),
+      peakHeight: Math.max(0.6, (Math.log(1 + p.promptCount) / Math.log(1500)) * MAX_H),
       sigma,
-      promptCount:  p.promptCount,
+      promptCount: p.promptCount,
       sessionCount: p.sessionCount,
-      age:          1 - (t - minT) / tRange,
+      age: 1 - (t - minT) / tRange,
     }
   })
 }
@@ -135,9 +135,9 @@ function buildContourRings(mounts: Mountain[]): ContourRing[] {
   for (const m of mounts) {
     for (let s = 1; s <= MAX_RINGS; s++) {
       const frac = s / (MAX_RINGS + 1)
-      const h    = frac * m.peakHeight
+      const h = frac * m.peakHeight
       const rRaw = m.sigma * Math.sqrt(-2 * Math.log(frac))
-      const r    = Math.min(rRaw, m.sigma * R_CAP_K)
+      const r = Math.min(rRaw, m.sigma * R_CAP_K)
       if (!isFinite(r) || r < 0.06) continue
 
       // Dim at base, full #5EAB07 near peak
@@ -158,46 +158,70 @@ function buildContourRings(mounts: Mountain[]): ContourRing[] {
   return rings
 }
 
-// ── Grid geometry ─────────────────────────────────────────────────────────────
+// ── Grid geometry — fixed 64×24 square cells ─────────────────────────────────
 
-function buildGridGeo(dr: DateRange) {
-  const xMin = toWorldX(dr.minDate, dr), xMax = toWorldX(dr.maxDate, dr)
-  const zMin = toWorldZ(0),              zMax = toWorldZ(24)
-  const dayStep  = dr.daySpan <= 30 ? 3 : dr.daySpan <= 60 ? 7 : dr.daySpan <= 120 ? 14 : 21
-  const majorV: number[] = [], minorV: number[] = []
+const GRID_NX = 64   // cells in X (date axis)
+const GRID_NZ = 24   // cells in Z (hour axis, 1 cell = 1 hour)
 
-  for (let d = 0; d <= dr.daySpan; d++) {
-    const x = toWorldX(new Date(dr.minDate.getTime() + d * 86_400_000), dr)
-    ;(d % dayStep === 0 ? majorV : minorV).push(x, 0, zMin, x, 0, zMax)
+const GRID_X_MIN = -WW * X_USE / 2, GRID_X_MAX = WW * X_USE / 2
+const GRID_Z_MIN = -WD * Z_USE / 2, GRID_Z_MAX = WD * Z_USE / 2
+
+function buildSquareGridGeo(): THREE.BufferGeometry {
+  const verts: number[] = []
+  for (let i = 0; i <= GRID_NX; i++) {
+    const x = GRID_X_MIN + (i / GRID_NX) * (GRID_X_MAX - GRID_X_MIN)
+    verts.push(x, 0, GRID_Z_MIN, x, 0, GRID_Z_MAX)
   }
-  for (let h = 0; h <= 24; h++) {
-    const z = toWorldZ(h)
-    ;(h % 3 === 0 ? majorV : minorV).push(xMin, 0, z, xMax, 0, z)
+  for (let j = 0; j <= GRID_NZ; j++) {
+    const z = GRID_Z_MIN + (j / GRID_NZ) * (GRID_Z_MAX - GRID_Z_MIN)
+    verts.push(GRID_X_MIN, 0, z, GRID_X_MAX, 0, z)
   }
-  const make = (v: number[]) => {
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3))
-    return g
-  }
-  return { major: make(majorV), minor: make(minorV) }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3))
+  return g
 }
 
 // ── React components ──────────────────────────────────────────────────────────
 
-function DateTimeGrid({ dr }: { dr: DateRange }) {
-  const { major, minor } = useMemo(() => buildGridGeo(dr), [dr])
+function DateTimeGrid() {
+  const geo = useMemo(() => buildSquareGridGeo(), [])
+  return (
+    <lineSegments geometry={geo}>
+      <lineBasicMaterial color={0xffffff} transparent opacity={0.18} />
+    </lineSegments>
+  )
+}
+
+/** White dots at every 4×4 grid intersection */
+function GridDots() {
+  const positions = useMemo(() => {
+    const pts: [number, number, number][] = []
+    for (let i = 0; i <= GRID_NX; i += 4) {
+      for (let j = 0; j <= GRID_NZ; j += 4) {
+        const x = GRID_X_MIN + (i / GRID_NX) * (GRID_X_MAX - GRID_X_MIN)
+        const z = GRID_Z_MIN + (j / GRID_NZ) * (GRID_Z_MAX - GRID_Z_MIN)
+        pts.push([x, 0.02, z])
+      }
+    }
+    return pts
+  }, [])
+
   return (
     <>
-      <lineSegments geometry={minor}><lineBasicMaterial color={0x0d200d} /></lineSegments>
-      <lineSegments geometry={major}><lineBasicMaterial color={0x183018} /></lineSegments>
+      {positions.map(([x, y, z], i) => (
+        <mesh key={i} position={[x, y, z]}>
+          <sphereGeometry args={[0.05, 7, 7]} />
+          <meshBasicMaterial color={0xBCCFBC} />
+        </mesh>
+      ))}
     </>
   )
 }
 
 function CoordinateAxes({ dr }: { dr: DateRange }) {
   const xMin = toWorldX(dr.minDate, dr), xMax = toWorldX(dr.maxDate, dr)
-  const zMin = toWorldZ(0),              zMax = toWorldZ(24)
-  const OFF  = 1.8
+  const zMin = toWorldZ(0), zMax = toWorldZ(24)
+  const OFF = 1.8
 
   const xLine: V3[] = [[xMin, 0, zMax + OFF], [xMax + OFF, 0, zMax + OFF]]
   const zLine: V3[] = [[xMin - OFF, 0, zMax], [xMin - OFF, 0, zMin - OFF]]
@@ -220,23 +244,23 @@ function CoordinateAxes({ dr }: { dr: DateRange }) {
       <Line points={zLine} color="#267026" lineWidth={1.6} />
       <Line points={xTicks} color="#1e5a1e" lineWidth={1.1} segments />
       <Line points={zTicks} color="#1e5a1e" lineWidth={1.1} segments />
-      <Line points={[[xMax+OFF-0.5,0,zMax+OFF+0.35],[xMax+OFF,0,zMax+OFF],[xMax+OFF-0.5,0,zMax+OFF-0.35]] as V3[]} color="#44aa44" lineWidth={1.4} />
-      <Line points={[[xMin-OFF-0.35,0,zMin-OFF+0.5],[xMin-OFF,0,zMin-OFF],[xMin-OFF+0.35,0,zMin-OFF+0.5]] as V3[]} color="#44aa44" lineWidth={1.4} />
+      <Line points={[[xMax + OFF - 0.5, 0, zMax + OFF + 0.35], [xMax + OFF, 0, zMax + OFF], [xMax + OFF - 0.5, 0, zMax + OFF - 0.35]] as V3[]} color="#44aa44" lineWidth={1.4} />
+      <Line points={[[xMin - OFF - 0.35, 0, zMin - OFF + 0.5], [xMin - OFF, 0, zMin - OFF], [xMin - OFF + 0.35, 0, zMin - OFF + 0.5]] as V3[]} color="#44aa44" lineWidth={1.4} />
     </>
   )
 }
 
 function DateLabels({ dr }: { dr: DateRange }) {
   const dayStep = dr.daySpan <= 30 ? 3 : dr.daySpan <= 60 ? 7 : dr.daySpan <= 120 ? 14 : 21
-  const zFront  = toWorldZ(24) + 3.2
+  const zFront = toWorldZ(24) + 3.2
   const items: JSX.Element[] = []
   for (let d = 0; d <= dr.daySpan; d += dayStep) {
     const date = new Date(dr.minDate.getTime() + d * 86_400_000)
-    const x    = toWorldX(date, dr)
+    const x = toWorldX(date, dr)
     items.push(
       <Billboard key={d} position={[x, 0, zFront]}>
         <Text fontSize={0.32} color="#3a7a3a" anchorX="center" anchorY="top">
-          {`${date.getMonth()+1}/${date.getDate()}`}
+          {`${date.getMonth() + 1}/${date.getDate()}`}
         </Text>
       </Billboard>
     )
@@ -276,15 +300,15 @@ function HourLabels({ dr }: { dr: DateRange }) {
 /** Contour lines — each ring is its own closed Line for guaranteed continuity.
  *  All materials share the same dashOffset, driven by a single useFrame. */
 function ContourLines({ mounts }: { mounts: Mountain[] }) {
-  const groupRef  = useRef<THREE.Group>(null)
-  const lineRefs  = useRef<any[]>([])
+  const groupRef = useRef<THREE.Group>(null)
+  const lineRefs = useRef<any[]>([])
   const rings = useMemo(() => {
     lineRefs.current = []
     return buildContourRings(mounts)
   }, [mounts])
 
   useFrame(({ clock }) => {
-    const t      = clock.getElapsedTime()
+    const t = clock.getElapsedTime()
     const offset = -(t * 0.18)
     for (const line of lineRefs.current) {
       if (line?.material) line.material.dashOffset = offset
@@ -358,40 +382,36 @@ function PeakLabels({ mounts }: { mounts: Mountain[] }) {
 export default function TerrainView(): JSX.Element {
   const { sessions, projects } = useStore()
 
-  const dr     = useMemo(() => getDateRange(sessions),                 [sessions])
+  const dr = useMemo(() => getDateRange(sessions), [sessions])
   const mounts = useMemo(() => buildMountains(projects, sessions, dr), [projects, sessions, dr])
 
   const firstDate = dr.minDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
-  const lastDate  = dr.maxDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
+  const lastDate = dr.maxDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
 
   return (
     <div className="w-full h-full bg-cyber-dark relative">
       <div className="absolute top-2 left-2 z-10 cyber-header text-cyber-text-dim py-1">
         ACTIVITY TERRAIN
       </div>
-      <div className="absolute top-2 right-2 z-10 font-mono text-cyber-text-dim" style={{fontSize:'10px'}}>
+      <div className="absolute top-2 right-2 z-10 font-mono text-cyber-text-dim" style={{ fontSize: '10px' }}>
         TOKEN USAGE · {firstDate} – {lastDate} · {dr.daySpan} DAYS
       </div>
       <div className="absolute bottom-2 left-2 z-10 flex items-center gap-3 font-mono"
-           style={{fontSize:'9px', color:'#3a6a3a'}}>
-        <span><span style={{color:'#aaff00'}}>X</span>=date created</span>
-        <span><span style={{color:'#aaff00'}}>Z</span>=hour of day</span>
-        <span><span style={{color:'#aaff00'}}>↑</span>=prompts</span>
-        <span><span style={{color:'#aaff00'}}>≡</span>=1 ridge=1 session</span>
+        style={{ fontSize: '9px', color: '#3a6a3a' }}>
+        <span><span style={{ color: '#aaff00' }}>X</span>=date created</span>
+        <span><span style={{ color: '#aaff00' }}>Z</span>=hour of day</span>
+        <span><span style={{ color: '#aaff00' }}>↑</span>=prompts</span>
+        <span><span style={{ color: '#aaff00' }}>≡</span>=1 ridge=1 session</span>
       </div>
 
-      <Canvas camera={{position:[2, 22, 30], fov:44}} style={{background:'#020702'}} gl={{antialias:true}}>
-        {/* Dark green ground plane */}
-        <mesh rotation={[-Math.PI/2, 0, 0]} position={[0, -0.02, 0]}>
-          <planeGeometry args={[WW * 1.15, WD * 1.15]} />
-          <meshBasicMaterial color={0x061206} />
-        </mesh>
-        <DateTimeGrid   dr={dr} />
+      <Canvas camera={{ position: [2, 22, 30], fov: 44 }} style={{ background: '#020702' }} gl={{ antialias: true }}>
+        <DateTimeGrid />
+        <GridDots />
         <CoordinateAxes dr={dr} />
-        <DateLabels     dr={dr} />
-        <HourLabels     dr={dr} />
-        <ContourLines   mounts={mounts} />
-        <PeakLabels     mounts={mounts} />
+        <DateLabels dr={dr} />
+        <HourLabels dr={dr} />
+        <ContourLines mounts={mounts} />
+        <PeakLabels mounts={mounts} />
 
         <OrbitControls enablePan enableZoom enableRotate
           maxPolarAngle={Math.PI / 2 - 0.03} minDistance={6} maxDistance={100}
@@ -403,7 +423,7 @@ export default function TerrainView(): JSX.Element {
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center text-cyber-text-dim">
             <p className="text-sm font-mono">NO SESSION DATA</p>
-            <p className="text-xs mt-1" style={{fontSize:'10px'}}>Ensure ~/.claude/projects/ exists</p>
+            <p className="text-xs mt-1" style={{ fontSize: '10px' }}>Ensure ~/.claude/projects/ exists</p>
           </div>
         </div>
       )}
