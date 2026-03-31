@@ -24,8 +24,6 @@ const WW       = 52      // world width  (X = date)
 const WD       = 28      // world depth  (Z = hour 0-24)
 const X_USE    = 0.82
 const Z_USE    = 0.84
-const HFIELD   = 100
-const DISP     = 48
 const MAX_H    = 8
 const MAX_MT   = 28
 const MAX_RINGS   = 10   // contour rings per mountain
@@ -122,51 +120,6 @@ function buildMountains(
   })
 }
 
-// ── Height field (for solid mesh body) ───────────────────────────────────────
-
-function buildHeightField(mounts: Mountain[]): Float32Array {
-  const f = new Float32Array(HFIELD * HFIELD)
-  for (const m of mounts) {
-    const cx = ((m.worldX / WW) + 0.5) * (HFIELD - 1)
-    const cz = ((m.worldZ / WD) + 0.5) * (HFIELD - 1)
-    const sg = (m.sigma / WW) * (HFIELD - 1)
-    const R  = Math.ceil(sg * 3.0)
-    for (let z = Math.max(0, Math.floor(cz-R)); z <= Math.min(HFIELD-1, Math.ceil(cz+R)); z++)
-      for (let x = Math.max(0, Math.floor(cx-R)); x <= Math.min(HFIELD-1, Math.ceil(cx+R)); x++) {
-        const dx = x - cx, dz = z - cz
-        f[z * HFIELD + x] += m.peakHeight * Math.exp(-(dx*dx + dz*dz) / (2 * sg*sg))
-      }
-  }
-  return f
-}
-
-function buildDisplayGeo(f: Float32Array): THREE.BufferGeometry {
-  const g = new THREE.PlaneGeometry(WW, WD, DISP-1, DISP-1)
-  g.rotateX(-Math.PI / 2)
-  const pos    = g.attributes.position.array as Float32Array
-  const colors = new Float32Array(DISP * DISP * 3)
-
-  for (let row = 0; row < DISP; row++) for (let col = 0; col < DISP; col++) {
-    const fr = (row / (DISP-1)) * (HFIELD-1), fc = (col / (DISP-1)) * (HFIELD-1)
-    const r0 = Math.min(Math.floor(fr), HFIELD-2), c0 = Math.min(Math.floor(fc), HFIELD-2)
-    const tr = fr - r0, tc = fc - c0
-    const h  = f[r0*HFIELD+c0]*(1-tr)*(1-tc) + f[(r0+1)*HFIELD+c0]*tr*(1-tc)
-             + f[r0*HFIELD+c0+1]*(1-tr)*tc   + f[(r0+1)*HFIELD+c0+1]*tr*tc
-    const idx = row * DISP + col
-    pos[idx * 3 + 1] = h
-
-    // Vertex color: #021709 at base → brighter green at peaks
-    const t = Math.min(1, Math.max(0, h / MAX_H))
-    colors[idx * 3]     = 0.008 + t * 0.028   // R: 2/255 → ~9/255
-    colors[idx * 3 + 1] = 0.090 + t * 0.200   // G: 23/255 → ~74/255
-    colors[idx * 3 + 2] = 0.035 + t * 0.065   // B: 9/255 → ~26/255
-  }
-
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  g.attributes.position.needsUpdate = true
-  g.computeVertexNormals()
-  return g
-}
 
 type V3 = [number, number, number]
 
@@ -320,18 +273,6 @@ function HourLabels({ dr }: { dr: DateRange }) {
   return <>{items}</>
 }
 
-function TerrainBody({ field }: { field: Float32Array }) {
-  const geo = useMemo(() => buildDisplayGeo(field), [field])
-  return (
-    <>
-      {/* Black fill */}
-      <mesh geometry={geo}><meshBasicMaterial color={0x000000} /></mesh>
-      {/* Wireframe overlay #0E6E30 */}
-      <mesh geometry={geo}><meshBasicMaterial color={0x0E6E30} wireframe /></mesh>
-    </>
-  )
-}
-
 /** Contour lines — each ring is its own closed Line for guaranteed continuity.
  *  All materials share the same dashOffset, driven by a single useFrame. */
 function ContourLines({ mounts }: { mounts: Mountain[] }) {
@@ -417,9 +358,8 @@ function PeakLabels({ mounts }: { mounts: Mountain[] }) {
 export default function TerrainView(): JSX.Element {
   const { sessions, projects } = useStore()
 
-  const dr          = useMemo(() => getDateRange(sessions),                 [sessions])
-  const mounts      = useMemo(() => buildMountains(projects, sessions, dr), [projects, sessions, dr])
-  const heightField = useMemo(() => buildHeightField(mounts),               [mounts])
+  const dr     = useMemo(() => getDateRange(sessions),                 [sessions])
+  const mounts = useMemo(() => buildMountains(projects, sessions, dr), [projects, sessions, dr])
 
   const firstDate = dr.minDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
   const lastDate  = dr.maxDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
@@ -450,7 +390,6 @@ export default function TerrainView(): JSX.Element {
         <CoordinateAxes dr={dr} />
         <DateLabels     dr={dr} />
         <HourLabels     dr={dr} />
-        <TerrainBody    field={heightField} />
         <ContourLines   mounts={mounts} />
         <PeakLabels     mounts={mounts} />
 
