@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Electron builder
+build/
+release/
+
+# Environment
+.env
+.env.local
+
+# TypeScript
+*.tsbuildinfo
