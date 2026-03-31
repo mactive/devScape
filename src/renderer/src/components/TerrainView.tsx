@@ -123,7 +123,134 @@ function buildMountains(
 
 type V3 = [number, number, number]
 
-// ── Contour rings — one closed circle per ring level ─────────────────────────
+// ── Deterministic hash ────────────────────────────────────────────────────────
+
+function fhash(n: number): number {
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453
+  return x - Math.floor(x)
+}
+function nameHash(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffffff
+  return h
+}
+
+// ── Organic terrain: sum-of-Gaussians + domain warping ───────────────────────
+
+interface Bump { dx: number; dz: number; amp: number; sig: number }
+
+/**
+ * 1 main peak + 4-5 additive secondary bumps (ridges) + 1-2 negative bumps
+ * (valleys). Secondary bumps are spread up to 1.8σ from centre.
+ */
+function makeBumps(name: string, peakH: number, sigma: number): Bump[] {
+  const s = nameHash(name)
+  const bumps: Bump[] = []
+
+  // Main peak — slight asymmetric offset
+  const mAng = fhash(s * 3) * Math.PI * 2
+  bumps.push({
+    dx: sigma * 0.14 * Math.cos(mAng),
+    dz: sigma * 0.14 * Math.sin(mAng),
+    amp: peakH * 0.55, sig: sigma
+  })
+
+  // 4-5 additive secondary bumps spread further out
+  const nAdd = 4 + (s & 1)
+  for (let i = 0; i < nAdd; i++) {
+    const ang  = fhash(s * 11 + i * 7) * Math.PI * 2
+    // push secondaries 0.6–1.8σ from centre (was 0–0.72σ)
+    const dist = sigma * (0.6 + fhash(s * 13 + i * 5) * 1.2)
+    bumps.push({
+      dx: dist * Math.cos(ang),
+      dz: dist * Math.sin(ang),
+      amp: peakH * (0.16 + fhash(s * 17 + i * 3) * 0.30),   // 16–46%
+      sig: sigma * (0.28 + fhash(s * 19 + i * 9) * 0.55)
+    })
+  }
+
+  // 1-2 negative bumps → concave bays / valleys in the contours
+  const nSub = 1 + (s & 1)
+  for (let i = 0; i < nSub; i++) {
+    const ang  = fhash(s * 23 + i * 11) * Math.PI * 2
+    const dist = sigma * (0.35 + fhash(s * 29 + i * 7) * 0.9)
+    bumps.push({
+      dx: dist * Math.cos(ang),
+      dz: dist * Math.sin(ang),
+      amp: -peakH * (0.12 + fhash(s * 31 + i * 13) * 0.16),  // −12..−28%
+      sig: sigma * (0.22 + fhash(s * 37 + i * 17) * 0.32)
+    })
+  }
+  return bumps
+}
+
+/** Raw Gaussian sum at local (lx, lz) */
+function evalH(lx: number, lz: number, bumps: Bump[]): number {
+  let h = 0
+  for (const b of bumps) {
+    const dx = lx - b.dx, dz = lz - b.dz
+    h += b.amp * Math.exp(-(dx * dx + dz * dz) / (2 * b.sig * b.sig))
+  }
+  return h
+}
+
+/**
+ * Domain warping: offset sample coords by a low-frequency sinusoidal field.
+ * Transforms smooth ellipses into flowing, organic isocurves (ref image look).
+ */
+function warp(lx: number, lz: number, sigma: number, seed: number): [number, number] {
+  const str = sigma * 0.55          // warp strength ≈ 55% of sigma
+  const f   = 1.4 / sigma           // spatial frequency (wider sigma → lower freq)
+  const p0 = fhash(seed * 41) * Math.PI * 2
+  const p1 = fhash(seed * 43) * Math.PI * 2
+  const p2 = fhash(seed * 47) * Math.PI * 2
+  const p3 = fhash(seed * 53) * Math.PI * 2
+  return [
+    lx + str * (Math.sin(f * lz + p0) * 0.65 + Math.sin(f * 0.71 * lx + p1) * 0.35),
+    lz + str * (Math.sin(f * lx + p2) * 0.65 + Math.sin(f * 0.83 * lz + p3) * 0.35)
+  ]
+}
+
+function evalHW(lx: number, lz: number, bumps: Bump[], sigma: number, seed: number): number {
+  const [wx, wz] = warp(lx, lz, sigma, seed)
+  return evalH(wx, wz, bumps)
+}
+
+/**
+ * Find the radius along `angle` where evalHW == targetH.
+ * Coarse scan first (handles non-monotonic fields from negative bumps + warp),
+ * then binary refinement.
+ */
+function findRadius(
+  angle: number, targetH: number,
+  bumps: Bump[], sigma: number, seed: number, maxR: number
+): number {
+  const cosA = Math.cos(angle), sinA = Math.sin(angle)
+  if (evalHW(0, 0, bumps, sigma, seed) <= targetH) return 0
+
+  const SCAN = 48
+  const step = maxR / SCAN
+  let prevH = evalHW(0, 0, bumps, sigma, seed)
+
+  for (let i = 1; i <= SCAN; i++) {
+    const r = i * step
+    const h = evalHW(r * cosA, r * sinA, bumps, sigma, seed)
+    if (h <= targetH) {
+      // Refine crossing between (i-1)*step and r
+      let lo = (i - 1) * step, hi = r
+      for (let j = 0; j < 22; j++) {
+        const mid = (lo + hi) * 0.5
+        if (evalHW(mid * cosA, mid * sinA, bumps, sigma, seed) > targetH) lo = mid
+        else hi = mid
+      }
+      return (lo + hi) * 0.5
+    }
+    prevH = h
+  }
+  return 0
+}
+
+// ── Contour ring builder ──────────────────────────────────────────────────────
 
 interface ContourRing { pts: V3[]; color: string }
 
@@ -133,26 +260,33 @@ const CONTOUR_R = 94, CONTOUR_G = 171, CONTOUR_B = 7
 function buildContourRings(mounts: Mountain[]): ContourRing[] {
   const rings: ContourRing[] = []
   for (const m of mounts) {
+    const seed  = nameHash(m.name)
+    const bumps = makeBumps(m.name, m.peakHeight, m.sigma)
+    const peak  = evalHW(0, 0, bumps, m.sigma, seed)
+    const maxR  = m.sigma * R_CAP_K * 2.0
+
     for (let s = 1; s <= MAX_RINGS; s++) {
-      const frac = s / (MAX_RINGS + 1)
-      const h = frac * m.peakHeight
-      const rRaw = m.sigma * Math.sqrt(-2 * Math.log(frac))
-      const r = Math.min(rRaw, m.sigma * R_CAP_K)
-      if (!isFinite(r) || r < 0.06) continue
+      const frac    = s / (MAX_RINGS + 1)
+      const targetH = frac * peak
+      const worldH  = frac * m.peakHeight
 
-      // Dim at base, full #5EAB07 near peak
-      const bright = 0.35 + 0.65 * frac
-      const cr = Math.round(CONTOUR_R * bright)
-      const cg = Math.round(CONTOUR_G * bright)
-      const segs = Math.max(48, Math.min(96, Math.round(r * 18)))
-
+      const SEGS = 90
       const pts: V3[] = []
-      for (let i = 0; i <= segs; i++) {
-        const a = (i / segs) * Math.PI * 2
-        pts.push([m.worldX + r * Math.cos(a), h, m.worldZ + r * Math.sin(a)])
+      let skip = false
+
+      for (let i = 0; i <= SEGS; i++) {
+        const angle = (i / SEGS) * Math.PI * 2
+        const r = findRadius(angle, targetH, bumps, m.sigma, seed, maxR)
+        if (r < 0.05) { skip = true; break }
+        pts.push([m.worldX + r * Math.cos(angle), worldH, m.worldZ + r * Math.sin(angle)])
       }
-      const cb = Math.round(CONTOUR_B * bright)
-      rings.push({ pts, color: `rgb(${cr},${cg},${cb})` })
+      if (skip) continue
+
+      const bright = 0.30 + 0.70 * frac
+      rings.push({
+        pts,
+        color: `rgb(${Math.round(CONTOUR_R*bright)},${Math.round(CONTOUR_G*bright)},${Math.round(CONTOUR_B*bright)})`
+      })
     }
   }
   return rings
