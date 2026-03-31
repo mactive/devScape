@@ -1,322 +1,384 @@
-import { useRef, useMemo, useEffect } from 'react'
+/**
+ * TerrainView — Mountain Range Topology
+ *
+ * Visual metaphor:
+ *  - Each project = one Gaussian mountain peak
+ *  - Peak height   = log(total prompts)  → depth of work
+ *  - Sigma (base)  = grows with session count → wider for longer-running projects
+ *  - Contour rings = one ring per session/conversation (equi-height spacing)
+ *  - X axis        = time (oldest projects left, newest right)
+ *  - Z axis        = staggered rows so mountains cluster into a connected range
+ */
+
+import { useRef, useMemo } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
-import { OrbitControls, Text } from '@react-three/drei'
+import { OrbitControls, Billboard, Text } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '../store'
-import type { Session } from '../types'
+import type { Session, ProjectStats } from '../types'
 
-const NUM_DAYS = 30
-const MAX_PROJECTS = 20
-const TERRAIN_WIDTH = 30
-const TERRAIN_DEPTH = 20
-const MAX_HEIGHT = 6
+// ── Constants ────────────────────────────────────────────────────────────────
 
-interface TerrainData {
-  grid: number[][]
-  projects: string[]
-  maxTokens: number
+const WORLD_W = 52        // world-space width  (X axis = time)
+const WORLD_D = 30        // world-space depth  (Z axis = stagger)
+const GRID    = 110       // height-field resolution
+const MAX_H   = 7         // max mountain height
+const MAX_MOUNTS = 22     // max number of mountains rendered
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface Mountain {
+  name:         string
+  worldX:       number    // center X in world space
+  worldZ:       number    // center Z in world space
+  peakHeight:   number    // max Y height
+  sigma:        number    // Gaussian spread (world units)
+  sessionCount: number    // number of sessions → number of contour rings
+  age:          number    // 0 = newest, 1 = oldest (for color tint)
 }
 
-function buildTerrainData(sessions: Session[]): TerrainData {
-  const now = new Date()
-  const tokenGrid: Map<string, number> = new Map()
-  const projectSet = new Set<string>()
-  const projectTokens = new Map<string, number>()
+// ── Layout ───────────────────────────────────────────────────────────────────
 
-  for (const session of sessions) {
-    const dayIndex = Math.floor(
-      (now.getTime() - new Date(session.startTime).getTime()) / (1000 * 60 * 60 * 24)
-    )
-    if (dayIndex < 0 || dayIndex >= NUM_DAYS) continue
+function buildMountains(projects: ProjectStats[], sessions: Session[]): Mountain[] {
+  if (projects.length === 0) return []
 
-    const col = NUM_DAYS - 1 - dayIndex // col 0 = oldest, col 29 = today
-    const key = `${col},${session.projectName}`
-    tokenGrid.set(key, (tokenGrid.get(key) || 0) + session.totalTokens)
-    projectSet.add(session.projectName)
-    projectTokens.set(
-      session.projectName,
-      (projectTokens.get(session.projectName) || 0) + session.totalTokens
-    )
+  // Map sessions → projects, find time bounds
+  const byProject = new Map<string, Session[]>()
+  for (const s of sessions) {
+    const arr = byProject.get(s.projectName) ?? []
+    arr.push(s)
+    byProject.set(s.projectName, arr)
   }
 
-  // Sort projects by total tokens, take top MAX_PROJECTS
-  const projects = Array.from(projectSet)
-    .sort((a, b) => (projectTokens.get(b) || 0) - (projectTokens.get(a) || 0))
-    .slice(0, MAX_PROJECTS)
-
-  const numProjects = Math.max(projects.length, 1)
-
-  // Build 2D grid [col][row]
-  const grid: number[][] = Array(NUM_DAYS)
-    .fill(null)
-    .map((_, col) =>
-      Array(numProjects)
-        .fill(null)
-        .map((__, row) => tokenGrid.get(`${col},${projects[row]}`) || 0)
-    )
-
-  // Gaussian smooth
-  const smoothed = gaussianSmooth2D(grid, NUM_DAYS, numProjects, 1.5)
-
-  const maxTokens = Math.max(...smoothed.flat(), 1)
-  const normalizedGrid = smoothed.map((col) =>
-    col.map((v) => (v / maxTokens) * MAX_HEIGHT)
-  )
-
-  return { grid: normalizedGrid, projects, maxTokens }
-}
-
-function gaussianSmooth2D(grid: number[][], cols: number, rows: number, sigma: number): number[][] {
-  const kernelSize = Math.ceil(sigma * 3) * 2 + 1
-  const kernel: number[] = []
-  let kernelSum = 0
-
-  for (let i = 0; i < kernelSize; i++) {
-    const x = i - Math.floor(kernelSize / 2)
-    const v = Math.exp((-x * x) / (2 * sigma * sigma))
-    kernel.push(v)
-    kernelSum += v
+  const lastActive = (name: string): number => {
+    const arr = byProject.get(name)
+    if (!arr?.length) return 0
+    return Math.max(...arr.map(s => new Date(s.startTime).getTime()))
   }
-  const normKernel = kernel.map((v) => v / kernelSum)
 
-  // Blur along columns
-  const tempGrid = Array(cols)
-    .fill(null)
-    .map((_, c) =>
-      Array(rows)
-        .fill(null)
-        .map((__, r) => {
-          let sum = 0
-          for (let k = 0; k < kernelSize; k++) {
-            const nc = c + k - Math.floor(kernelSize / 2)
-            const val = nc >= 0 && nc < cols ? grid[nc][r] : 0
-            sum += val * normKernel[k]
-          }
-          return sum
-        })
-    )
+  // Sort by last-active, oldest first (→ left on X axis)
+  const sorted = projects
+    .slice(0, MAX_MOUNTS)
+    .sort((a, b) => lastActive(a.name) - lastActive(b.name))
 
-  // Blur along rows
-  return Array(cols)
-    .fill(null)
-    .map((_, c) =>
-      Array(rows)
-        .fill(null)
-        .map((__, r) => {
-          let sum = 0
-          for (let k = 0; k < kernelSize; k++) {
-            const nr = r + k - Math.floor(kernelSize / 2)
-            const val = nr >= 0 && nr < rows ? tempGrid[c][nr] : 0
-            sum += val * normKernel[k]
-          }
-          return sum
-        })
-    )
-}
+  const times  = sorted.map(p => lastActive(p.name))
+  const minT   = times[0]  || 0
+  const maxT   = times[times.length - 1] || 1
+  const tRange = maxT - minT || 1
 
-function TerrainMesh({ terrainData }: { terrainData: TerrainData }) {
-  const meshRef = useRef<THREE.Mesh>(null)
-  const origHeights = useRef<Float32Array>(new Float32Array(0))
+  // Four staggered rows, hexagonal-ish packing
+  // Row offsets in Z (world units): front → back
+  const zRows = [-10, -3.5, 3.5, 10]
 
-  const { grid, projects } = terrainData
-  const numCols = NUM_DAYS
-  const numRows = Math.max(projects.length, 1)
+  const mountains: Mountain[] = sorted.map((p, i) => {
+    // X: proportional to last-active time, with small golden-ratio jitter
+    const tFrac   = (times[i] - minT) / tRange                    // 0..1
+    const jitter  = ((i * 0.6180339887) % 1 - 0.5) * 4            // ±2 units
+    const worldX  = (tFrac - 0.5) * (WORLD_W * 0.82) + jitter
 
-  const geometry = useMemo(() => {
-    // Use 2x resolution for smoother terrain
-    const segCols = numCols * 2 - 1
-    const segRows = numRows * 2 - 1
+    // Z: cycle through 4 rows, each row slightly offset in X
+    const row     = i % zRows.length
+    const rowXoff = (row % 2 === 0 ? 0 : 2.5)                     // hex offset
+    const worldZ  = zRows[row] + ((i * 0.4) % 2 - 1)              // ±1 fine jitter
 
-    const geo = new THREE.PlaneGeometry(
-      TERRAIN_WIDTH,
-      TERRAIN_DEPTH,
-      segCols,
-      segRows
-    )
-    geo.rotateX(-Math.PI / 2)
+    const sc     = p.sessionCount
+    const prompts = p.promptCount
 
-    const positions = geo.attributes.position.array as Float32Array
-    const vertCols = segCols + 1
-    const vertRows = segRows + 1
-    const heights = new Float32Array(vertCols * vertRows)
+    // Height: log scale so huge projects don't dwarf small ones
+    const peakHeight = Math.max(0.6, (Math.log(1 + prompts) / Math.log(2000)) * MAX_H)
 
-    for (let vr = 0; vr < vertRows; vr++) {
-      for (let vc = 0; vc < vertCols; vc++) {
-        // Map vertex to data coordinates (bilinear interpolation)
-        const dataCol = (vc / segCols) * (numCols - 1)
-        const dataRow = (vr / segRows) * (numRows - 1)
+    // Sigma: base 3 + grows slowly with sessions (wider base = longer project history)
+    const sigma = 3.0 + Math.log(1 + sc) * 0.65
 
-        const c0 = Math.floor(dataCol)
-        const c1 = Math.min(c0 + 1, numCols - 1)
-        const r0 = Math.floor(dataRow)
-        const r1 = Math.min(r0 + 1, numRows - 1)
-        const tc = dataCol - c0
-        const tr = dataRow - r0
+    const age = 1 - tFrac   // 0=newest, 1=oldest
 
-        const h00 = grid[c0]?.[r0] ?? 0
-        const h10 = grid[c1]?.[r0] ?? 0
-        const h01 = grid[c0]?.[r1] ?? 0
-        const h11 = grid[c1]?.[r1] ?? 0
-
-        const h = h00 * (1 - tc) * (1 - tr) + h10 * tc * (1 - tr) + h01 * (1 - tc) * tr + h11 * tc * tr
-
-        const idx = (vr * vertCols + vc) * 3 + 1
-        positions[idx] = h
-        heights[vr * vertCols + vc] = h
-      }
+    return {
+      name:         p.name,
+      worldX:       worldX + rowXoff,
+      worldZ,
+      peakHeight,
+      sigma,
+      sessionCount: sc,
+      age,
     }
-
-    geo.attributes.position.needsUpdate = true
-    geo.computeVertexNormals()
-    origHeights.current = heights
-    return geo
-  }, [grid, numCols, numRows])
-
-  useFrame(({ clock }) => {
-    if (!meshRef.current || !geometry) return
-    const t = clock.getElapsedTime()
-    const positions = geometry.attributes.position.array as Float32Array
-    const n = origHeights.current.length
-
-    for (let i = 0; i < n; i++) {
-      const base = origHeights.current[i]
-      const breathe = Math.sin(t * 0.6 + i * 0.07) * 0.04 * (base + 0.3)
-      positions[i * 3 + 1] = base + breathe
-    }
-    geometry.attributes.position.needsUpdate = true
   })
 
+  return mountains
+}
+
+// ── Height Field ─────────────────────────────────────────────────────────────
+
+function buildHeightField(mountains: Mountain[]): Float32Array {
+  const field = new Float32Array(GRID * GRID)
+
+  for (const m of mountains) {
+    // Map world coords → grid indices
+    const cx = ((m.worldX / WORLD_W) + 0.5) * (GRID - 1)
+    const cz = ((m.worldZ / WORLD_D) + 0.5) * (GRID - 1)
+    // sigma in grid units
+    const sg = (m.sigma / WORLD_W) * (GRID - 1)
+    const R  = Math.ceil(sg * 3.2)
+
+    const x0 = Math.max(0, Math.floor(cx - R))
+    const x1 = Math.min(GRID - 1, Math.ceil(cx + R))
+    const z0 = Math.max(0, Math.floor(cz - R))
+    const z1 = Math.min(GRID - 1, Math.ceil(cz + R))
+
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx, dz = z - cz
+        field[z * GRID + x] += m.peakHeight * Math.exp(-(dx * dx + dz * dz) / (2 * sg * sg))
+      }
+    }
+  }
+  return field
+}
+
+// ── Contour Ring Geometry ────────────────────────────────────────────────────
+
+/**
+ * For each mountain, emit N concentric circles (N = sessionCount).
+ * Ring i is placed at height  h_i = (i / (N+1)) * peakHeight
+ * and has radius r_i such that  Gaussian(r_i) = h_i
+ *   → r_i = sigma * sqrt(-2 * ln(h_i / H))
+ *
+ * Color: height-based brightness, age-based hue shift
+ */
+function buildContourGeometry(mountains: Mountain[]): THREE.BufferGeometry {
+  const verts:  number[] = []
+  const colors: number[] = []
+
+  for (const m of mountains) {
+    const N = Math.min(m.sessionCount, 35)
+    if (N === 0) continue
+    const H = m.peakHeight
+    const σ = m.sigma
+
+    // Age tint: newest = pure #aaff00, oldest = muted #336622
+    const baseR = THREE.MathUtils.lerp(0.67, 0.2,  m.age)
+    const baseG = THREE.MathUtils.lerp(1.00, 0.40, m.age)
+    const baseB = 0.0
+
+    for (let s = 1; s <= N; s++) {
+      const frac = s / (N + 1)          // 0 < frac < 1, evenly spaced heights
+      const h    = frac * H             // world Y of this contour ring
+
+      // Radius on the isolated Gaussian at height h
+      const ratio = frac                // = h / H (since H = m.peakHeight)
+      if (ratio <= 0.02 || ratio >= 0.99) continue
+      const r = σ * Math.sqrt(-2.0 * Math.log(ratio))
+      if (!isFinite(r) || r > 22 || r < 0.15) continue
+
+      // Rings closer to peak are brighter + more opaque
+      const bright = 0.25 + 0.75 * frac
+      const cr = baseR * bright
+      const cg = baseG * bright
+      const cb = baseB
+
+      // Segments: more for larger circles (looks smoother)
+      const segs = Math.max(18, Math.min(52, Math.round(r * 7)))
+
+      for (let i = 0; i < segs; i++) {
+        const a0 = (i / segs) * Math.PI * 2
+        const a1 = ((i + 1) / segs) * Math.PI * 2
+        // Two endpoints of this line segment
+        verts.push(
+          m.worldX + r * Math.cos(a0), h, m.worldZ + r * Math.sin(a0),
+          m.worldX + r * Math.cos(a1), h, m.worldZ + r * Math.sin(a1),
+        )
+        colors.push(cr, cg, cb, cr, cg, cb)
+      }
+    }
+  }
+
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts),  3))
+  geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(colors), 3))
+  return geo
+}
+
+// ── React Components ─────────────────────────────────────────────────────────
+
+/** Dark filled base mesh built from summed Gaussians */
+function TerrainBase({ field }: { field: Float32Array }) {
+  const geo = useMemo(() => {
+    const g = new THREE.PlaneGeometry(WORLD_W, WORLD_D, GRID - 1, GRID - 1)
+    g.rotateX(-Math.PI / 2)
+    const pos = g.attributes.position.array as Float32Array
+    for (let i = 0; i < GRID * GRID; i++) pos[i * 3 + 1] = field[i]
+    g.attributes.position.needsUpdate = true
+    g.computeVertexNormals()
+    return g
+  }, [field])
+
   return (
-    <mesh ref={meshRef} geometry={geometry}>
-      <meshBasicMaterial wireframe color={new THREE.Color('#aaff00')} />
+    <mesh geometry={geo} receiveShadow>
+      <meshBasicMaterial color={new THREE.Color(0x040c04)} />
     </mesh>
   )
 }
 
-function PeakLabels({ terrainData }: { terrainData: TerrainData }) {
-  const { grid, projects } = terrainData
-  const peaks: Array<{ x: number; z: number; label: string; height: number }> = []
+/** All contour rings as one merged LineSegments draw call */
+function ContourLines({ mountains }: { mountains: Mountain[] }) {
+  const ref   = useRef<THREE.Group>(null)
+  const geo   = useMemo(() => buildContourGeometry(mountains), [mountains])
 
-  const numCols = NUM_DAYS
-  const numRows = projects.length
+  // Very subtle breathing — whole group bobs gently
+  useFrame(({ clock }) => {
+    if (ref.current) {
+      ref.current.position.y = Math.sin(clock.getElapsedTime() * 0.35) * 0.06
+    }
+  })
 
-  // Find peak for each project
-  for (let r = 0; r < Math.min(numRows, 8); r++) {
-    let maxH = 0
-    let maxC = 0
-    for (let c = 0; c < numCols; c++) {
-      const h = grid[c]?.[r] ?? 0
-      if (h > maxH) { maxH = h; maxC = c }
-    }
-    if (maxH > 0.5) {
-      const x = -TERRAIN_WIDTH / 2 + (maxC / (numCols - 1)) * TERRAIN_WIDTH
-      const z = -TERRAIN_DEPTH / 2 + (r / Math.max(numRows - 1, 1)) * TERRAIN_DEPTH
-      peaks.push({ x, z, label: projects[r].toUpperCase(), height: maxH })
-    }
-  }
+  return (
+    <group ref={ref}>
+      <lineSegments geometry={geo}>
+        <lineBasicMaterial vertexColors />
+      </lineSegments>
+    </group>
+  )
+}
+
+/** Billboard labels above each peak */
+function PeakLabels({ mountains }: { mountains: Mountain[] }) {
+  // Show top 12 peaks
+  const peaks = [...mountains]
+    .sort((a, b) => b.peakHeight - a.peakHeight)
+    .slice(0, 12)
 
   return (
     <>
-      {peaks.map((peak, i) => (
-        <Text
-          key={i}
-          position={[peak.x, peak.height + 0.8, peak.z]}
-          fontSize={0.5}
-          color="#aaff00"
-          anchorX="center"
-          anchorY="bottom"
-          outlineWidth={0.05}
-          outlineColor="#000000"
-          maxWidth={6}
-        >
-          {peak.label}
-        </Text>
+      {peaks.map((m, i) => (
+        <Billboard key={i} position={[m.worldX, m.peakHeight + 1.1, m.worldZ]}>
+          <Text
+            fontSize={0.42}
+            color={m.age < 0.25 ? '#aaff00' : m.age < 0.6 ? '#77cc44' : '#446633'}
+            anchorX="center"
+            anchorY="bottom"
+            outlineWidth={0.07}
+            outlineColor="#000000"
+            maxWidth={9}
+          >
+            {m.name.toUpperCase().slice(0, 20)}
+          </Text>
+          {/* small tick down to peak */}
+          <Text
+            fontSize={0.28}
+            color={m.age < 0.4 ? '#668844' : '#334422'}
+            anchorX="center"
+            anchorY="top"
+            position={[0, -0.05, 0]}
+          >
+            {m.sessionCount}s · {m.peakHeight.toFixed(1)}
+          </Text>
+        </Billboard>
       ))}
     </>
   )
 }
 
+/** Subtle floor grid — gives scale and depth */
 function GridFloor() {
   return (
-    <gridHelper
-      args={[TERRAIN_WIDTH + 4, 20, '#1a2a1a', '#0d180d']}
-      position={[0, -0.05, 0]}
-    />
+    <>
+      <gridHelper
+        args={[WORLD_W + 10, 30, 0x0f200f, 0x0a150a]}
+        position={[0, -0.02, 0]}
+      />
+      {/* Outer boundary frame */}
+      <lineSegments>
+        <edgesGeometry
+          args={[new THREE.PlaneGeometry(WORLD_W + 0.5, WORLD_D + 0.5).rotateX(-Math.PI / 2) as THREE.BufferGeometry]}
+        />
+        <lineBasicMaterial color={0x1a3a1a} />
+      </lineSegments>
+    </>
   )
 }
 
-function AxisLabels() {
-  const today = new Date()
-  const labels = []
+/** X-axis time ticks */
+function TimeAxis({ mountains }: { mountains: Mountain[] }) {
+  if (mountains.length < 2) return null
 
-  for (let i = 0; i <= 4; i++) {
-    const daysAgo = Math.round((4 - i) * 7)
-    const date = new Date(today)
-    date.setDate(date.getDate() - daysAgo)
-    const label = `${date.getMonth() + 1}/${date.getDate()}`
-    const x = -TERRAIN_WIDTH / 2 + (i / 4) * TERRAIN_WIDTH
+  // oldest and newest
+  const oldest = mountains.reduce((a, b) => a.worldX < b.worldX ? a : b)
+  const newest = mountains.reduce((a, b) => a.worldX > b.worldX ? a : b)
 
-    labels.push(
-      <Text
-        key={`day-${i}`}
-        position={[x, -0.2, TERRAIN_DEPTH / 2 + 1.5]}
-        fontSize={0.4}
-        color="#446644"
-        anchorX="center"
-        anchorY="top"
-      >
-        {label}
-      </Text>
-    )
-  }
-
-  return <>{labels}</>
+  return (
+    <>
+      <Billboard position={[oldest.worldX, -0.4, WORLD_D / 2 + 2]}>
+        <Text fontSize={0.38} color="#335533" anchorX="center">OLDER</Text>
+      </Billboard>
+      <Billboard position={[newest.worldX, -0.4, WORLD_D / 2 + 2]}>
+        <Text fontSize={0.38} color="#77bb44" anchorX="center">RECENT</Text>
+      </Billboard>
+    </>
+  )
 }
 
-export default function TerrainView(): JSX.Element {
-  const { sessions } = useStore()
+// ── Main Export ───────────────────────────────────────────────────────────────
 
-  const terrainData = useMemo(() => buildTerrainData(sessions), [sessions])
+export default function TerrainView(): JSX.Element {
+  const { sessions, projects } = useStore()
+
+  const mountains  = useMemo(() => buildMountains(projects, sessions),  [projects, sessions])
+  const heightField = useMemo(() => buildHeightField(mountains), [mountains])
+
+  const totalRings = mountains.reduce((s, m) => s + Math.min(m.sessionCount, 35), 0)
 
   return (
     <div className="w-full h-full bg-cyber-dark relative">
-      {/* Corner label */}
+
+      {/* HUD labels */}
       <div className="absolute top-2 left-2 z-10 cyber-header text-cyber-text-dim py-1">
         ACTIVITY TERRAIN
       </div>
-
-      {/* Day range label */}
       <div className="absolute top-2 right-2 z-10 text-xs font-mono text-cyber-text-dim">
-        LAST 30 DAYS · {terrainData.projects.length} PROJECTS
+        {mountains.length} PEAKS · {totalRings} RINGS
+      </div>
+      <div
+        className="absolute bottom-2 left-2 z-10 flex items-center gap-3 font-mono"
+        style={{ fontSize: '9px', color: '#446644' }}
+      >
+        <span>
+          <span style={{ color: '#aaff00' }}>↑</span> height = prompt depth
+        </span>
+        <span>
+          <span style={{ color: '#aaff00' }}>○</span> 1 ring = 1 session
+        </span>
+        <span>
+          <span style={{ color: '#aaff00' }}>→</span> left=old · right=new
+        </span>
       </div>
 
       <Canvas
-        camera={{ position: [0, 12, 20], fov: 50 }}
-        style={{ background: '#0a0a0a' }}
+        camera={{ position: [8, 16, 26], fov: 44 }}
+        style={{ background: '#040904' }}
         gl={{ antialias: true }}
       >
-        <ambientLight intensity={0.1} />
-        <TerrainMesh terrainData={terrainData} />
-        <PeakLabels terrainData={terrainData} />
+        <TerrainBase    field={heightField} />
+        <ContourLines   mountains={mountains} />
+        <PeakLabels     mountains={mountains} />
+        <TimeAxis       mountains={mountains} />
         <GridFloor />
-        <AxisLabels />
+
         <OrbitControls
-          enablePan={true}
-          enableZoom={true}
-          enableRotate={true}
-          maxPolarAngle={Math.PI / 2}
+          enablePan
+          enableZoom
+          enableRotate
+          maxPolarAngle={Math.PI / 2 - 0.03}
           minDistance={5}
-          maxDistance={50}
-          target={[0, 0, 0]}
+          maxDistance={75}
+          target={[0, 1, 0]}
         />
-        <fog attach="fog" args={['#0a0a0a', 30, 80]} />
+        <fog attach="fog" args={['#040904', 45, 95]} />
       </Canvas>
 
       {sessions.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center text-cyber-text-dim">
-            <p className="text-sm font-mono mb-2">NO SESSION DATA</p>
-            <p className="text-xs" style={{ fontSize: '10px' }}>
+            <p className="text-sm font-mono">NO SESSION DATA</p>
+            <p className="text-xs mt-1" style={{ fontSize: '10px' }}>
               Ensure ~/.claude/projects/ exists
             </p>
           </div>
