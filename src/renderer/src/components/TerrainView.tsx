@@ -59,6 +59,35 @@ function toWorldZ(hour: number): number {
   return ((Math.max(0, Math.min(24, hour)) / 24) - 0.5) * WD * Z_USE
 }
 
+// ── Mountain repulsion — push overlapping peaks apart ────────────────────────
+
+function repelMountains(mounts: { worldX: number; worldZ: number; sigma: number }[]): void {
+  const xBound = WW * X_USE * 0.5
+  const zBound = WD * Z_USE * 0.5
+  // visual outer ring radius ≈ 0.68 * sigma * 2.15 ≈ 1.46σ
+  // so two mountains need dist >= 1.46*(σi+σj) → use 1.5 as multiplier
+  for (let iter = 0; iter < 120; iter++) {
+    let moved = false
+    for (let i = 0; i < mounts.length; i++) {
+      for (let j = i + 1; j < mounts.length; j++) {
+        const dx = mounts[j].worldX - mounts[i].worldX
+        const dz = mounts[j].worldZ - mounts[i].worldZ
+        const dist = Math.sqrt(dx * dx + dz * dz) || 1e-6
+        const minDist = (mounts[i].sigma + mounts[j].sigma) * 1.5
+        if (dist < minDist) {
+          const push = (minDist - dist) / dist * 0.55
+          mounts[i].worldX = Math.max(-xBound, Math.min(xBound, mounts[i].worldX - dx * push))
+          mounts[i].worldZ = Math.max(-zBound, Math.min(zBound, mounts[i].worldZ - dz * push))
+          mounts[j].worldX = Math.max(-xBound, Math.min(xBound, mounts[j].worldX + dx * push))
+          mounts[j].worldZ = Math.max(-zBound, Math.min(zBound, mounts[j].worldZ + dz * push))
+          moved = true
+        }
+      }
+    }
+    if (!moved) break
+  }
+}
+
 // ── Mountain type + layout ────────────────────────────────────────────────────
 
 interface Mountain {
@@ -97,14 +126,12 @@ function buildMountains(
   // Normalize prompt counts for sigma scaling
   const maxPc = Math.max(...visible.map(p => p.promptCount), 1)
 
-  return visible.map(p => {
+  const result = visible.map(p => {
     const t = firstTime.get(p.name)!
     const d = new Date(t)
     const hour = d.getHours() + d.getMinutes() / 60
-    const norm = p.promptCount / maxPc   // 0..1
+    const norm = p.promptCount / maxPc
 
-    // Big projects → smaller sigma (steep narrow ribs)
-    // Small projects → larger sigma (flat oval contours)
     const sigma = sigmaBase * (1 - 0.55 * norm)
 
     return {
@@ -118,6 +145,9 @@ function buildMountains(
       age: 1 - (t - minT) / tRange,
     }
   })
+
+  repelMountains(result)
+  return result
 }
 
 
@@ -158,7 +188,7 @@ function makeBumps(name: string, peakH: number, sigma: number): Bump[] {
   // 4-5 additive secondary bumps spread further out
   const nAdd = 4 + (s & 1)
   for (let i = 0; i < nAdd; i++) {
-    const ang  = fhash(s * 11 + i * 7) * Math.PI * 2
+    const ang = fhash(s * 11 + i * 7) * Math.PI * 2
     // push secondaries 0.6–1.8σ from centre (was 0–0.72σ)
     const dist = sigma * (0.6 + fhash(s * 13 + i * 5) * 1.2)
     bumps.push({
@@ -172,7 +202,7 @@ function makeBumps(name: string, peakH: number, sigma: number): Bump[] {
   // 1-2 negative bumps → concave bays / valleys in the contours
   const nSub = 1 + (s & 1)
   for (let i = 0; i < nSub; i++) {
-    const ang  = fhash(s * 23 + i * 11) * Math.PI * 2
+    const ang = fhash(s * 23 + i * 11) * Math.PI * 2
     const dist = sigma * (0.35 + fhash(s * 29 + i * 7) * 0.9)
     bumps.push({
       dx: dist * Math.cos(ang),
@@ -200,7 +230,7 @@ function evalH(lx: number, lz: number, bumps: Bump[]): number {
  */
 function warp(lx: number, lz: number, sigma: number, seed: number): [number, number] {
   const str = sigma * 0.55          // warp strength ≈ 55% of sigma
-  const f   = 1.4 / sigma           // spatial frequency (wider sigma → lower freq)
+  const f = 1.4 / sigma           // spatial frequency (wider sigma → lower freq)
   const p0 = fhash(seed * 41) * Math.PI * 2
   const p1 = fhash(seed * 43) * Math.PI * 2
   const p2 = fhash(seed * 47) * Math.PI * 2
@@ -260,15 +290,15 @@ const CONTOUR_R = 94, CONTOUR_G = 171, CONTOUR_B = 7
 function buildContourRings(mounts: Mountain[]): ContourRing[] {
   const rings: ContourRing[] = []
   for (const m of mounts) {
-    const seed  = nameHash(m.name)
+    const seed = nameHash(m.name)
     const bumps = makeBumps(m.name, m.peakHeight, m.sigma)
-    const peak  = evalHW(0, 0, bumps, m.sigma, seed)
-    const maxR  = m.sigma * R_CAP_K * 2.0
+    const peak = evalHW(0, 0, bumps, m.sigma, seed)
+    const maxR = m.sigma * R_CAP_K * 2.0
 
     for (let s = 1; s <= MAX_RINGS; s++) {
-      const frac    = s / (MAX_RINGS + 1)
+      const frac = s / (MAX_RINGS + 1)
       const targetH = frac * peak
-      const worldH  = frac * m.peakHeight
+      const worldH = frac * m.peakHeight
 
       const SEGS = 90
       const pts: V3[] = []
@@ -276,8 +306,9 @@ function buildContourRings(mounts: Mountain[]): ContourRing[] {
 
       for (let i = 0; i <= SEGS; i++) {
         const angle = (i / SEGS) * Math.PI * 2
-        const r = findRadius(angle, targetH, bumps, m.sigma, seed, maxR)
-        if (r < 0.05) { skip = true; break }
+        const rRaw = findRadius(angle, targetH, bumps, m.sigma, seed, maxR)
+        const r = rRaw * 0.68   // shrink visual radius 60%, height stays the same
+        if (r < 0.02) { skip = true; break }
         pts.push([m.worldX + r * Math.cos(angle), worldH, m.worldZ + r * Math.sin(angle)])
       }
       if (skip) continue
@@ -285,7 +316,7 @@ function buildContourRings(mounts: Mountain[]): ContourRing[] {
       const bright = 0.30 + 0.70 * frac
       rings.push({
         pts,
-        color: `rgb(${Math.round(CONTOUR_R*bright)},${Math.round(CONTOUR_G*bright)},${Math.round(CONTOUR_B*bright)})`
+        color: `rgb(${Math.round(CONTOUR_R * bright)},${Math.round(CONTOUR_G * bright)},${Math.round(CONTOUR_B * bright)})`
       })
     }
   }
