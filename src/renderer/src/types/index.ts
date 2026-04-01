@@ -35,6 +35,10 @@ export interface ProjectStats {
   sessionCount: number
   promptCount: number
   lastActive: string
+  toolCallCount: number   // total tool_use calls across all sessions
+  bashCallCount: number   // subset that are Bash calls
+  toolDensity: number     // toolCallCount / promptCount (0 if no prompts)
+  bashRatio: number       // bashCallCount / toolCallCount (0 if no tools)
 }
 
 export interface HeatmapCell {

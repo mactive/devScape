@@ -71,6 +71,10 @@ export interface ProjectStats {
   sessionCount: number
   promptCount: number
   lastActive: string
+  toolCallCount: number
+  bashCallCount: number
+  toolDensity: number
+  bashRatio: number
 }
 
 function decodeDirName(dirName: string): string {
@@ -173,6 +177,8 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
         let totalInputTokens = 0
         let totalOutputTokens = 0
         let totalCacheTokens = 0
+        let toolCallCount = 0
+        let bashCallCount = 0
         let startTime: Date | null = null
         let endTime: Date | null = null
         let hasError = false
@@ -207,6 +213,16 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
             } else if (msg.type === 'assistant' && msg.message) {
               const text = extractTextContent(msg.message.content)
               const toolName = extractToolName(msg.message.content)
+
+              // Count all tool_use blocks in this message
+              if (Array.isArray(msg.message.content)) {
+                for (const block of msg.message.content) {
+                  if (block.type === 'tool_use') {
+                    toolCallCount++
+                    if (block.name === 'Bash') bashCallCount++
+                  }
+                }
+              }
 
               if (msg.message.usage) {
                 const usage = msg.message.usage
@@ -275,11 +291,17 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
           totalTokens: 0,
           sessionCount: 0,
           promptCount: 0,
-          lastActive: session.endTime
+          lastActive: session.endTime,
+          toolCallCount: 0,
+          bashCallCount: 0,
+          toolDensity: 0,
+          bashRatio: 0,
         }
         existing.totalTokens += session.totalTokens
         existing.sessionCount++
         existing.promptCount += promptCount
+        existing.toolCallCount += toolCallCount
+        existing.bashCallCount += bashCallCount
         if (session.endTime > existing.lastActive) {
           existing.lastActive = session.endTime
         }
@@ -292,9 +314,12 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
 
   sessions.sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
 
-  const projects = Array.from(projectMap.values()).sort(
-    (a, b) => b.totalTokens - a.totalTokens
-  )
+  const projects = Array.from(projectMap.values())
+  for (const p of projects) {
+    p.toolDensity = p.promptCount > 0 ? p.toolCallCount / p.promptCount : 0
+    p.bashRatio   = p.toolCallCount > 0 ? p.bashCallCount / p.toolCallCount : 0
+  }
+  projects.sort((a, b) => b.totalTokens - a.totalTokens)
 
   return { sessions, projects }
 }

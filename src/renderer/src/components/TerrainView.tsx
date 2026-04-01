@@ -94,6 +94,8 @@ interface Mountain {
   name: string; worldX: number; worldZ: number
   peakHeight: number; sigma: number
   promptCount: number; sessionCount: number; age: number
+  toolDensity: number   // tool calls per prompt
+  bashRatio: number     // bash / total tool calls, 0..1
 }
 
 function buildMountains(
@@ -143,6 +145,8 @@ function buildMountains(
       promptCount: p.promptCount,
       sessionCount: p.sessionCount,
       age: 1 - (t - minT) / tRange,
+      toolDensity: p.toolDensity ?? 0,
+      bashRatio: p.bashRatio ?? 0,
     }
   })
 
@@ -491,13 +495,73 @@ function ContourLines({ mounts }: { mounts: Mountain[] }) {
           ref={(el: any) => { lineRefs.current[i] = el }}
           points={ring.pts}
           color={ring.color}
-          lineWidth={2.0}
+          lineWidth={1.0}
           dashed
-          dashSize={0.5}
-          gapSize={0.22}
+          dashSize={0.2}
+          gapSize={0.2}
         />
       ))}
     </group>
+  )
+}
+
+// ── Tool Density Particles ────────────────────────────────────────────────────
+// Floating particles above peak — count scales with toolDensity.
+// Each mountain emits up to 32 particles drifting upward in a slow spiral.
+
+function ToolParticles({ m }: { m: Mountain }) {
+  const COUNT = Math.max(1, Math.min(160, Math.round(m.toolDensity * 5)))
+  const seed = nameHash(m.name)
+
+  // Static per-particle offsets (angle, radius, phase, speed)
+  const params = useMemo(() => Array.from({ length: COUNT }, (_, i) => ({
+    angle: fhash(seed * 7 + i * 13) * Math.PI * 2,
+    radius: 0.12 + fhash(seed * 11 + i * 17) * 0.55,
+    phase: fhash(seed * 19 + i * 23) * Math.PI * 2,
+    speed: 0.22 + fhash(seed * 29 + i * 31) * 0.38,
+    yBase: m.peakHeight * (0.8 + fhash(seed * 37 + i * 41) * 0.5),
+    yRange: 0.3 + fhash(seed * 43 + i * 47) * 0.5,
+  })), [m.peakHeight, COUNT, seed])
+
+  const meshRefs = useRef<(THREE.Mesh | null)[]>([])
+
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime()
+    for (let i = 0; i < COUNT; i++) {
+      const mesh = meshRefs.current[i]
+      if (!mesh) continue
+      const p = params[i]
+      const angle = p.angle + t * p.speed
+      mesh.position.set(
+        m.worldX + Math.cos(angle) * p.radius,
+        p.yBase + Math.sin(t * p.speed * 1.3 + p.phase) * p.yRange,
+        m.worldZ + Math.sin(angle) * p.radius
+      )
+      // Pulse opacity via scale
+      const pulse = 0.7 + 0.3 * Math.sin(t * p.speed * 2.1 + p.phase)
+      mesh.scale.setScalar(pulse)
+    }
+  })
+
+  const color = '#B4D3D9'
+
+  return (
+    <>
+      {params.map((_, i) => (
+        <mesh key={i} ref={el => { meshRefs.current[i] = el }}>
+          <sphereGeometry args={[0.045, 5, 5]} />
+          <meshBasicMaterial color={color} />
+        </mesh>
+      ))}
+    </>
+  )
+}
+
+function EffectLayer({ mounts }: { mounts: Mountain[] }) {
+  return (
+    <>
+      {mounts.map((m, i) => <ToolParticles key={i} m={m} />)}
+    </>
   )
 }
 
@@ -563,10 +627,11 @@ export default function TerrainView(): JSX.Element {
       </div>
       <div className="absolute bottom-2 left-2 z-10 flex items-center gap-3 font-mono"
         style={{ fontSize: '9px', color: '#3a6a3a' }}>
-        <span><span style={{ color: '#aaff00' }}>X</span>=date created</span>
-        <span><span style={{ color: '#aaff00' }}>Z</span>=hour of day</span>
+        <span><span style={{ color: '#aaff00' }}>X</span>=date</span>
+        <span><span style={{ color: '#aaff00' }}>Z</span>=hour</span>
         <span><span style={{ color: '#aaff00' }}>↑</span>=prompts</span>
-        <span><span style={{ color: '#aaff00' }}>≡</span>=1 ridge=1 session</span>
+        <span><span style={{ color: '#88ddff' }}>●</span>=tool density</span>
+        <span><span style={{ color: '#ff6414' }}>○</span>=bash ratio</span>
       </div>
 
       <Canvas camera={{ position: [2, 22, 30], fov: 44 }} style={{ background: '#020702' }} gl={{ antialias: true }}>
@@ -576,6 +641,7 @@ export default function TerrainView(): JSX.Element {
         <DateLabels dr={dr} />
         <HourLabels dr={dr} />
         <ContourLines mounts={mounts} />
+        <EffectLayer mounts={mounts} />
         <PeakLabels mounts={mounts} />
 
         <OrbitControls enablePan enableZoom enableRotate
