@@ -31,11 +31,12 @@ export default function App(): JSX.Element {
 
         {/* Center: Terrain or Drilldown */}
         <div className="flex-1 min-w-0 overflow-hidden relative">
-          {selectedSession ? (
-            <DrilldownView />
-          ) : (
+          <div className={`absolute inset-0 transition-all duration-300 ${selectedSession ? 'opacity-0 pointer-events-none scale-95' : 'opacity-100 scale-100'}`}>
             <TerrainView />
-          )}
+          </div>
+          <div className={`absolute inset-0 transition-all duration-300 ${selectedSession ? 'opacity-100 scale-100' : 'opacity-0 pointer-events-none scale-105'}`}>
+            {selectedSession && <DrilldownView />}
+          </div>
         </div>
 
         {/* Right: Projects */}

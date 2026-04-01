@@ -5,6 +5,7 @@ interface AppState {
   sessions: Session[]
   projects: ProjectStats[]
   selectedSession: Session | null
+  selectedProjectName: string | null
   loadingDetail: boolean
   loading: boolean
   error: string | null
@@ -15,6 +16,7 @@ interface AppState {
 
   loadSessions: () => Promise<void>
   selectSession: (session: Session | null) => Promise<void>
+  selectProject: (name: string | null) => void
   setHeatmapMode: (mode: HeatmapMode) => void
   setHeatmapTimeRange: (range: HeatmapTimeRange) => void
   setHeatmapProject: (project: string) => void
@@ -32,6 +34,7 @@ export const useStore = create<AppState>((set, get) => ({
   sessions: [],
   projects: [],
   selectedSession: null,
+  selectedProjectName: null,
   loadingDetail: false,
   loading: false,
   error: null,
@@ -45,7 +48,13 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await (window as any).api.getSessions()
-      set({ sessions: result.sessions || [], projects: result.projects || [], loading: false })
+      
+      // Deduplicate projects by name
+      const uniqueProjects = Array.from(
+        new Map((result.projects || []).map((p: ProjectStats) => [p.name, p])).values()
+      ) as ProjectStats[]
+      
+      set({ sessions: result.sessions || [], projects: uniqueProjects, loading: false })
     } catch (err) {
       set({ error: String(err), loading: false })
     }
@@ -56,7 +65,8 @@ export const useStore = create<AppState>((set, get) => ({
       set({ selectedSession: null })
       return
     }
-    set({ loadingDetail: true })
+    // Also select the corresponding project to ensure the terrain updates
+    set({ selectedSession: session, selectedProjectName: session.projectName, loadingDetail: true })
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const detail = await (window as any).api.getSessionDetail(session.id)
@@ -69,6 +79,8 @@ export const useStore = create<AppState>((set, get) => ({
       set({ selectedSession: session, loadingDetail: false })
     }
   },
+
+  selectProject: (name) => set({ selectedProjectName: name }),
 
   setHeatmapMode: (mode) => set({ heatmapMode: mode }),
   setHeatmapTimeRange: (range) => set({ heatmapTimeRange: range }),

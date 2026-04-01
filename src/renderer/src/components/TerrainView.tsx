@@ -11,8 +11,8 @@
  * Big projects → steep narrow ridges; small projects → flat oval contours.
  */
 
-import { useRef, useMemo } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
+import { useRef, useMemo, useEffect } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Billboard, Text, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '../store'
@@ -293,7 +293,7 @@ function findRadius(
 
 // ── Contour ring builder ──────────────────────────────────────────────────────
 
-interface ContourRing { pts: V3[]; color: string }
+interface ContourRing { pts: V3[]; color: string; mountainName: string }
 
 // #5EAB07 = rgb(94, 171, 7)
 const CONTOUR_R = 94, CONTOUR_G = 171, CONTOUR_B = 7
@@ -327,7 +327,8 @@ function buildContourRings(mounts: Mountain[]): ContourRing[] {
       const bright = 0.30 + 0.70 * frac
       rings.push({
         pts,
-        color: `rgb(${Math.round(CONTOUR_R * bright)},${Math.round(CONTOUR_G * bright)},${Math.round(CONTOUR_B * bright)})`
+        color: `rgb(${Math.round(CONTOUR_R * bright)},${Math.round(CONTOUR_G * bright)},${Math.round(CONTOUR_B * bright)})`,
+        mountainName: m.name
       })
     }
   }
@@ -475,7 +476,7 @@ function HourLabels({ dr }: { dr: DateRange }) {
 
 /** Contour lines — each ring is its own closed Line for guaranteed continuity.
  *  All materials share the same dashOffset, driven by a single useFrame. */
-function ContourLines({ mounts }: { mounts: Mountain[] }) {
+function ContourLines({ mounts, activeMountainName }: { mounts: Mountain[], activeMountainName: string | null }) {
   const groupRef = useRef<THREE.Group>(null)
   const lineRefs = useRef<any[]>([])
   const rings = useMemo(() => {
@@ -483,14 +484,29 @@ function ContourLines({ mounts }: { mounts: Mountain[] }) {
     return buildContourRings(mounts)
   }, [mounts])
 
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime()
-    const offset = -(t * 0.18)
-    for (const line of lineRefs.current) {
-      if (line?.material) line.material.dashOffset = offset
+  const offsets = useRef<number[]>([])
+
+  useFrame((state, delta) => {
+    if (offsets.current.length !== rings.length) {
+      offsets.current = new Array(rings.length).fill(0)
     }
-    if (groupRef.current)
+
+    for (let i = 0; i < rings.length; i++) {
+      const ring = rings[i]
+      const isActive = ring.mountainName === activeMountainName
+      const speed = isActive ? 0.36 : 0.18
+      offsets.current[i] -= delta * speed
+
+      const line = lineRefs.current[i]
+      if (line?.material) {
+        line.material.dashOffset = offsets.current[i]
+      }
+    }
+
+    if (groupRef.current) {
+      const t = state.clock.getElapsedTime()
       groupRef.current.position.y = Math.sin(t * 0.36) * 0.05
+    }
   })
 
   if (!rings.length) return null
@@ -516,7 +532,7 @@ function ContourLines({ mounts }: { mounts: Mountain[] }) {
 // Floating particles above peak — count scales with toolDensity.
 // Each mountain emits up to 32 particles drifting upward in a slow spiral.
 
-function ToolParticles({ m }: { m: Mountain }) {
+function ToolParticles({ m, isActive }: { m: Mountain, isActive?: boolean }) {
   const COUNT = Math.max(1, Math.min(160, Math.round(m.toolDensity * 20)))
   const seed = nameHash(m.name)
 
@@ -549,16 +565,21 @@ function ToolParticles({ m }: { m: Mountain }) {
   }, [m.peakHeight, COUNT, seed, m.name, m.sigma])
 
   const meshRefs = useRef<(THREE.Mesh | null)[]>([])
+  const accumulatedTime = useRef(0)
 
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime()
+  useFrame((_, delta) => {
+    // Speed up 2x if isActive
+    const timeMultiplier = isActive ? 2.0 : 1.0
+    accumulatedTime.current += delta * timeMultiplier
+    const effectiveT = accumulatedTime.current
+
     for (let i = 0; i < COUNT; i++) {
       const mesh = meshRefs.current[i]
       if (!mesh) continue
       const p = params[i]
 
-      const currentAngle = p.angle + t * p.speed * 0.2
-      const life = (t * p.speed * 0.5 + p.phase) % 1.0
+      const currentAngle = p.angle + effectiveT * p.speed * 0.2
+      const life = (effectiveT * p.speed * 0.5 + p.phase) % 1.0
       const currentR = p.radius + life * 0.2
 
       mesh.position.set(
@@ -585,12 +606,70 @@ function ToolParticles({ m }: { m: Mountain }) {
   )
 }
 
-function EffectLayer({ mounts }: { mounts: Mountain[] }) {
+function EffectLayer({ mounts, activeMountainName }: { mounts: Mountain[], activeMountainName: string | null }) {
   return (
     <>
-      {mounts.map((m, i) => <ToolParticles key={i} m={m} />)}
+      {mounts.map((m, i) => <ToolParticles key={i} m={m} isActive={m.name === activeMountainName} />)}
     </>
   )
+}
+
+function CameraRig({ activeMountain }: { activeMountain?: Mountain }) {
+  const { camera, controls } = useThree()
+  const isAnimating = useRef(false)
+  const targetPos = useRef(new THREE.Vector3())
+  const targetLookAt = useRef(new THREE.Vector3())
+
+  useEffect(() => {
+    isAnimating.current = true
+    if (activeMountain) {
+      targetLookAt.current.set(activeMountain.worldX, activeMountain.peakHeight * 0.4, activeMountain.worldZ)
+      targetPos.current.set(activeMountain.worldX + 2, Math.max(activeMountain.peakHeight + 6, 12), activeMountain.worldZ + 12)
+    } else {
+      targetLookAt.current.set(0, 1, 0)
+      targetPos.current.set(2, 22, 30)
+    }
+  }, [activeMountain])
+
+  useEffect(() => {
+    if (controls) {
+      const onStart = () => { isAnimating.current = false }
+      controls.addEventListener('start', onStart)
+      return () => { controls.removeEventListener('start', onStart) }
+    }
+  }, [controls])
+
+  useFrame(() => {
+    if (controls) {
+      const ctrl = controls as any
+      if (isAnimating.current) {
+        let moved = false
+        if (ctrl.target) {
+          const dTarget = ctrl.target.distanceTo(targetLookAt.current)
+          if (dTarget > 0.05) {
+            ctrl.target.lerp(targetLookAt.current, 0.05)
+            moved = true
+          } else {
+            ctrl.target.copy(targetLookAt.current)
+          }
+        }
+
+        const dPos = camera.position.distanceTo(targetPos.current)
+        if (dPos > 0.05) {
+          camera.position.lerp(targetPos.current, 0.03)
+          moved = true
+        } else {
+          camera.position.copy(targetPos.current)
+        }
+
+        if (!moved) {
+          isAnimating.current = false
+        }
+      }
+      ctrl.update()
+    }
+  })
+  return null
 }
 
 /** HUD-style peak labels: vertical stem line + bracket box */
@@ -637,10 +716,13 @@ function PeakLabels({ mounts }: { mounts: Mountain[] }) {
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export default function TerrainView(): JSX.Element {
-  const { sessions, projects } = useStore()
+  const { sessions, projects, selectedProjectName, selectedSession } = useStore()
 
   const dr = useMemo(() => getDateRange(sessions), [sessions])
   const mounts = useMemo(() => buildMountains(projects, sessions, dr), [projects, sessions, dr])
+
+  const activeProjectName = selectedProjectName || selectedSession?.projectName
+  const activeMountain = useMemo(() => mounts.find(m => m.name === activeProjectName), [mounts, activeProjectName])
 
   const firstDate = dr.minDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
   const lastDate = dr.maxDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
@@ -650,6 +732,17 @@ export default function TerrainView(): JSX.Element {
       <div className="absolute top-2 left-2 z-10 cyber-header text-cyber-text-dim py-1">
         ACTIVITY TERRAIN
       </div>
+      {activeProjectName && (
+        <button
+          onClick={() => {
+            useStore.getState().selectProject(null)
+            useStore.getState().selectSession(null)
+          }}
+          className="absolute top-12 left-2 z-10 px-3 py-1 bg-cyber-dark border border-cyber-green text-cyber-green text-xs font-mono rounded hover:bg-cyber-green/20 transition-colors cursor-pointer"
+        >
+          ← GLOBAL VIEW
+        </button>
+      )}
       <div className="absolute top-2 right-2 z-10 font-mono text-cyber-text-dim" style={{ fontSize: '10px' }}>
         TOKEN USAGE · {firstDate} – {lastDate} · {dr.daySpan} DAYS
       </div>
@@ -663,16 +756,17 @@ export default function TerrainView(): JSX.Element {
       </div>
 
       <Canvas camera={{ position: [2, 22, 30], fov: 44 }} style={{ background: '#020702' }} gl={{ antialias: true }}>
+        <CameraRig activeMountain={activeMountain} />
         <DateTimeGrid />
         <GridDots />
         <CoordinateAxes dr={dr} />
         <DateLabels dr={dr} />
         <HourLabels dr={dr} />
-        <ContourLines mounts={mounts} />
-        <EffectLayer mounts={mounts} />
+        <ContourLines mounts={mounts} activeMountainName={activeProjectName || null} />
+        <EffectLayer mounts={mounts} activeMountainName={activeProjectName || null} />
         <PeakLabels mounts={mounts} />
 
-        <OrbitControls enablePan enableZoom enableRotate
+        <OrbitControls enablePan enableZoom enableRotate makeDefault
           maxPolarAngle={Math.PI / 2 - 0.03} minDistance={6} maxDistance={100}
           target={[0, 1, 0]} />
         <fog attach="fog" args={['#020702', 55, 120]} />

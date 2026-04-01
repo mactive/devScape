@@ -12,12 +12,12 @@ const PROJECT_COLORS = [
 ]
 
 export default function ProjectsList(): JSX.Element {
-  const { projects, sessions, selectedSession, selectSession } = useStore()
+  const { projects, sessions, selectedProjectName, selectProject, selectSession, selectedSession } = useStore()
 
   const maxTokens = projects[0]?.totalTokens || 1
 
-  // Get project for selected session
-  const activeProject = selectedSession?.projectPath
+  // Determine the active project logic
+  const activeProjectName = selectedProjectName || selectedSession?.projectName
 
   return (
     <div className="flex flex-col h-full bg-cyber-dark">
@@ -34,19 +34,17 @@ export default function ProjectsList(): JSX.Element {
             NO DATA
           </div>
         ) : (
-          projects.slice(0, 25).map((project, i) => {
+          projects.map((project, i) => {
             const pct = (project.totalTokens / maxTokens) * 100
             const color = PROJECT_COLORS[i % PROJECT_COLORS.length]
-            const isActive = activeProject === project.path
+            const isActive = activeProjectName === project.name
 
             return (
               <div
-                key={project.path}
+                key={`${project.path}-${i}`}
                 className={`mb-2 cursor-pointer group ${isActive ? 'opacity-100' : 'opacity-80 hover:opacity-100'}`}
                 onClick={() => {
-                  // Find the most recent session for this project
-                  const ps = sessions.find((s) => s.projectPath === project.path)
-                  if (ps) selectSession(isActive ? null : ps)
+                  selectProject(isActive ? null : project.name)
                 }}
               >
                 {/* Project name */}
@@ -82,11 +80,28 @@ export default function ProjectsList(): JSX.Element {
                   />
                 </div>
 
-                {/* Sessions count */}
-                <div className="flex items-center gap-2 mt-0.5">
+                {/* Sessions count and Detail button */}
+                <div className="flex items-center justify-between mt-0.5 min-h-[16px]">
                   <span style={{ fontSize: '8px', color: '#334433' }}>
                     {project.sessionCount}s · {project.promptCount}p
                   </span>
+                  
+                  {isActive && (
+                    <button 
+                      className="bg-cyber-accent text-black font-bold py-[2px] px-4 rounded-sm text-[8px] hover:bg-[#ccee22] transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (selectedSession?.projectName === project.name) {
+                          selectSession(null)
+                        } else {
+                          const ps = sessions.find((s) => s.projectName === project.name)
+                          if (ps) selectSession(ps)
+                        }
+                      }}
+                    >
+                      {selectedSession?.projectName === project.name ? 'CLOSE DETAIL' : 'DETAIL'}
+                    </button>
+                  )}
                 </div>
               </div>
             )

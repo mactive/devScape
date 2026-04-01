@@ -30,20 +30,22 @@ const STATUS_CONFIG = {
 interface Props {
   session: Session
   isSelected: boolean
+  isProjectSelected: boolean
 }
 
-export default function SessionCard({ session, isSelected }: Props): JSX.Element {
-  const { selectSession } = useStore()
+export default function SessionCard({ session, isSelected, isProjectSelected }: Props): JSX.Element {
+  const { selectSession, selectProject } = useStore()
   const statusCfg = STATUS_CONFIG[session.status]
 
   return (
     <div
-      className={`px-3 py-2 border-b border-cyber-border cursor-pointer transition-all group ${
-        isSelected
-          ? 'bg-cyber-border border-l-2 border-l-neon-green'
-          : 'hover:bg-cyber-gray border-l-2 border-l-transparent'
-      }`}
-      onClick={() => selectSession(isSelected ? null : session)}
+      className={`px-3 py-2 border-b border-cyber-border cursor-pointer transition-all group ${isProjectSelected
+        ? 'bg-cyber-border border-l-2 border-l-neon-green'
+        : 'hover:bg-cyber-gray border-l-2 border-l-transparent'
+        }`}
+      onClick={() => {
+        selectProject(session.projectName)
+      }}
     >
       {/* Header row */}
       <div className="flex items-center justify-between mb-1">
@@ -56,15 +58,11 @@ export default function SessionCard({ session, isSelected }: Props): JSX.Element
               boxShadow: `0 0 4px ${statusCfg.color}`
             }}
           />
-          {/* Project name */}
           <span
-            className="text-xs font-mono truncate"
-            style={{
-              color: isSelected ? '#aaff00' : '#88bb88',
-              maxWidth: '120px'
-            }}
+            className="text-xs font-mono"
+            style={{ color: statusCfg.color, fontSize: '9px', opacity: 0.8 }}
           >
-            {session.projectName}
+            {statusCfg.label}
           </span>
         </div>
         <span className="text-cyber-text-dim text-xs flex-shrink-0 ml-1">
@@ -89,7 +87,26 @@ export default function SessionCard({ session, isSelected }: Props): JSX.Element
       </p>
 
       {/* Footer row */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between min-h-[16px]">
+        <div className="flex items-center gap-2">
+          {isProjectSelected && (
+            <button
+              className="font-bold py-[1px] px-2 rounded-sm transition-colors"
+              style={{
+                fontSize: '8px',
+                backgroundColor: isSelected ? '#aaff00' : 'transparent',
+                color: isSelected ? '#000' : '#85CD51',
+                border: isSelected ? 'none' : '1px solid #85CD51'
+              }}
+              onClick={(e) => {
+                e.stopPropagation()
+                selectSession(isSelected ? null : session)
+              }}
+            >
+              {isSelected ? 'CLOSE' : 'DETAIL'}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <span className="text-cyber-text-dim" style={{ fontSize: '9px' }}>
             {session.promptCount}p
@@ -98,12 +115,6 @@ export default function SessionCard({ session, isSelected }: Props): JSX.Element
             {formatTokens(session.totalTokens)}t
           </span>
         </div>
-        <span
-          className="text-xs font-mono"
-          style={{ color: statusCfg.color, fontSize: '9px', opacity: 0.8 }}
-        >
-          {statusCfg.label}
-        </span>
       </div>
     </div>
   )
