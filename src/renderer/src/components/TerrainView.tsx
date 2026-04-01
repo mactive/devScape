@@ -40,7 +40,6 @@ function getDateRange(sessions: Session[]): DateRange {
   }
   const ts = sessions.map(s => new Date(s.startTime).getTime())
   const minT = Math.min(...ts)
-  const maxT = Math.max(...ts)
   // Axis: from actual first session (floored to day) to today
   const min = new Date(minT); min.setHours(0, 0, 0, 0)
   const max = new Date(); max.setHours(23, 59, 59, 999)
@@ -118,7 +117,8 @@ function buildMountains(
   if (!visible.length) return []
 
   const ts = visible.map(p => firstTime.get(p.name)!)
-  const minT = Math.min(...ts), maxT = Math.max(...ts)
+  const minT = Math.min(...ts)
+  const maxT = Math.max(...ts)
   const tRange = Math.max(maxT - minT, 1)
 
   // Sigma base adapts to date range span
@@ -128,7 +128,11 @@ function buildMountains(
   // Normalize prompt counts for sigma scaling
   const maxPc = Math.max(...visible.map(p => p.promptCount), 1)
 
-  const result = visible.map(p => {
+  // Calculate raw heights to find the average
+  const rawHeights = visible.map(p => Math.max(0.6, (Math.log(1 + p.promptCount) / Math.log(1500)) * MAX_H))
+  const avgHeight = rawHeights.reduce((a, b) => a + b, 0) / (rawHeights.length || 1)
+
+  const result = visible.map((p, index) => {
     const t = firstTime.get(p.name)!
     const d = new Date(t)
     const hour = d.getHours() + d.getMinutes() / 60
@@ -136,11 +140,16 @@ function buildMountains(
 
     const sigma = sigmaBase * (1 - 0.55 * norm)
 
+    let peakHeight = rawHeights[index]
+    if (peakHeight < avgHeight) {
+      peakHeight = avgHeight
+    }
+
     return {
       name: p.name,
       worldX: toWorldX(d, dr),
       worldZ: toWorldZ(hour),
-      peakHeight: Math.max(0.6, (Math.log(1 + p.promptCount) / Math.log(1500)) * MAX_H),
+      peakHeight,
       sigma,
       promptCount: p.promptCount,
       sessionCount: p.sessionCount,
@@ -264,7 +273,6 @@ function findRadius(
 
   const SCAN = 48
   const step = maxR / SCAN
-  let prevH = evalHW(0, 0, bumps, sigma, seed)
 
   for (let i = 1; i <= SCAN; i++) {
     const r = i * step
@@ -279,7 +287,6 @@ function findRadius(
       }
       return (lo + hi) * 0.5
     }
-    prevH = h
   }
   return 0
 }
@@ -380,7 +387,7 @@ function GridDots() {
       {positions.map(([x, y, z], i) => (
         <mesh key={i} position={[x, y, z]}>
           <sphereGeometry args={[0.05, 7, 7]} />
-          <meshBasicMaterial color={0xBCCFBC} />
+          <meshBasicMaterial color={0x7FB77E} />
         </mesh>
       ))}
     </>
@@ -510,18 +517,36 @@ function ContourLines({ mounts }: { mounts: Mountain[] }) {
 // Each mountain emits up to 32 particles drifting upward in a slow spiral.
 
 function ToolParticles({ m }: { m: Mountain }) {
-  const COUNT = Math.max(1, Math.min(160, Math.round(m.toolDensity * 5)))
+  const COUNT = Math.max(1, Math.min(160, Math.round(m.toolDensity * 20)))
   const seed = nameHash(m.name)
 
-  // Static per-particle offsets (angle, radius, phase, speed)
-  const params = useMemo(() => Array.from({ length: COUNT }, (_, i) => ({
-    angle: fhash(seed * 7 + i * 13) * Math.PI * 2,
-    radius: 0.12 + fhash(seed * 11 + i * 17) * 0.55,
-    phase: fhash(seed * 19 + i * 23) * Math.PI * 2,
-    speed: 0.22 + fhash(seed * 29 + i * 31) * 0.38,
-    yBase: m.peakHeight * (0.8 + fhash(seed * 37 + i * 41) * 0.5),
-    yRange: 0.3 + fhash(seed * 43 + i * 47) * 0.5,
-  })), [m.peakHeight, COUNT, seed])
+  // Static per-particle offsets (angle, radius, phase, speed, color)
+  const params = useMemo(() => {
+    const bumps = makeBumps(m.name, m.peakHeight, m.sigma)
+    const peak = evalHW(0, 0, bumps, m.sigma, seed)
+    const maxR = m.sigma * R_CAP_K * 2.0
+    const frac = MAX_RINGS / (MAX_RINGS + 1)
+    const targetH = frac * peak
+    const worldH = frac * m.peakHeight
+
+    const colors = ['#B4D3D9', '#E8DBB3', '#FFFDEB']
+
+    return Array.from({ length: COUNT }, (_, i) => {
+      const angle = fhash(seed * 7 + i * 13) * Math.PI * 2
+      const maxTopR = findRadius(angle, targetH, bumps, m.sigma, seed, maxR) * 0.68
+      const radius = maxTopR * Math.sqrt(fhash(seed * 11 + i * 17))
+
+      return {
+        angle,
+        radius,
+        phase: fhash(seed * 19 + i * 23) * Math.PI * 2,
+        speed: 0.22 + fhash(seed * 29 + i * 31) * 0.38,
+        yBase: worldH,
+        yRange: 0.4 + fhash(seed * 43 + i * 47) * 1.0,
+        color: colors[Math.floor(fhash(seed * 53 + i * 59) * colors.length)]
+      }
+    })
+  }, [m.peakHeight, COUNT, seed, m.name, m.sigma])
 
   const meshRefs = useRef<(THREE.Mesh | null)[]>([])
 
@@ -531,26 +556,29 @@ function ToolParticles({ m }: { m: Mountain }) {
       const mesh = meshRefs.current[i]
       if (!mesh) continue
       const p = params[i]
-      const angle = p.angle + t * p.speed
+
+      const currentAngle = p.angle + t * p.speed * 0.2
+      const life = (t * p.speed * 0.5 + p.phase) % 1.0
+      const currentR = p.radius + life * 0.2
+
       mesh.position.set(
-        m.worldX + Math.cos(angle) * p.radius,
-        p.yBase + Math.sin(t * p.speed * 1.3 + p.phase) * p.yRange,
-        m.worldZ + Math.sin(angle) * p.radius
+        m.worldX + Math.cos(currentAngle) * currentR,
+        p.yBase + life * p.yRange,
+        m.worldZ + Math.sin(currentAngle) * currentR
       )
-      // Pulse opacity via scale
-      const pulse = 0.7 + 0.3 * Math.sin(t * p.speed * 2.1 + p.phase)
-      mesh.scale.setScalar(pulse)
+
+      // Pulse scale to simulate appearing and fading out like an eruption
+      const pulse = Math.sin(life * Math.PI) * 1.2
+      mesh.scale.setScalar(Math.max(0.001, pulse))
     }
   })
 
-  const color = '#B4D3D9'
-
   return (
     <>
-      {params.map((_, i) => (
+      {params.map((p, i) => (
         <mesh key={i} ref={el => { meshRefs.current[i] = el }}>
           <sphereGeometry args={[0.045, 5, 5]} />
-          <meshBasicMaterial color={color} />
+          <meshBasicMaterial color={p.color} />
         </mesh>
       ))}
     </>
