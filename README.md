@@ -2,7 +2,7 @@
 
 > 一个赛博朋克风格的桌面仪表盘，将你的 AI 辅助开发历程可视化为炫酷的 3D 地形图。
 
-![DevScape Screenshot](spec/devscape_1.png)
+![DevScape Screenshot](spec/devscape_0.png)
 
 ---
 
