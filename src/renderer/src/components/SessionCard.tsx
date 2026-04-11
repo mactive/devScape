@@ -36,7 +36,7 @@ const SOURCE_CONFIG = {
   trae: {
     label: 'TRAE', color: '#4cada5'
   },
-  'trae-cn': { label: 'TRAECN', color: '#2c9adf' }
+  'trae-cn': { label: 'TRAECN', color: '#acdf2c' }
 } as const
 
 interface Props {

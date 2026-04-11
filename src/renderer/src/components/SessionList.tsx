@@ -8,7 +8,7 @@ const SOURCE_CONFIG = {
   trae: {
     label: 'Trae', color: '#4cada5'
   },
-  'trae-cn': { label: 'TraeCN', color: '#2c9adf' }
+  'trae-cn': { label: 'TraeCN', color: '#acdf2c' }
 } as const
 
 function projectSelectionKey(source: ProjectStats['source'] | Session['source'], projectPath: string): string {

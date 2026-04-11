@@ -32,7 +32,7 @@ const R_CAP_K = 1.55 // max ring radius = R_CAP_K × sigma
 const SOURCE_COLORS: Record<DataSource, string> = {
   claude: '#5EAB07',
   trae: '#4cada5',
-  'trae-cn': '#2c9adf'
+  'trae-cn': '#acdf2c'
 }
 
 function sourceLabel(source: DataSource): string {

@@ -29,7 +29,7 @@ export default function DrilldownView(): JSX.Element {
   const sourceConfig = {
     claude: { label: 'CLAUDE CODE', color: '#5EAB07' },
     trae: { label: 'TRAE', color: '#4cada5' },
-    'trae-cn': { label: 'TRAE CN', color: '#2c9adf' }
+    'trae-cn': { label: 'TRAE CN', color: '#acdf2c' }
   } as const
   const activeSource = sourceConfig[selectedSession.source]
 
