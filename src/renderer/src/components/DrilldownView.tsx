@@ -28,8 +28,8 @@ export default function DrilldownView(): JSX.Element {
   const messages = selectedSession.messages || []
   const sourceConfig = {
     claude: { label: 'CLAUDE CODE', color: '#5EAB07' },
-    trae: { label: 'TRAE', color: '#6AECE1' },
-    'trae-cn': { label: 'TRAE CN', color: '#26CCC2' }
+    trae: { label: 'TRAE', color: '#4cada5' },
+    'trae-cn': { label: 'TRAE CN', color: '#2c9adf' }
   } as const
   const activeSource = sourceConfig[selectedSession.source]
 
@@ -181,11 +181,10 @@ function MessageBubble({ msg }: MsgProps) {
 
       {/* Content */}
       <div
-        className={`font-mono leading-relaxed px-3 py-2 border-l-2 w-full ${
-          isUser
-            ? 'border-l-cyber-border-bright text-cyber-text'
-            : 'border-l-neon-green'
-        }`}
+        className={`font-mono leading-relaxed px-3 py-2 border-l-2 w-full ${isUser
+          ? 'border-l-cyber-border-bright text-cyber-text'
+          : 'border-l-neon-green'
+          }`}
         style={{
           fontSize: '11px',
           lineHeight: '1.6',

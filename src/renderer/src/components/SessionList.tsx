@@ -1,24 +1,31 @@
 import { useState, useMemo } from 'react'
 import { useStore } from '../store'
 import SessionCard from './SessionCard'
+import type { ProjectStats, Session } from '../types'
 
 const SOURCE_CONFIG = {
   claude: { label: 'Claude', color: '#5EAB07' },
-  trae: { label: 'Trae', color: '#6AECE1' },
-  'trae-cn': { label: 'TraeCN', color: '#26CCC2' }
+  trae: {
+    label: 'Trae', color: '#4cada5'
+  },
+  'trae-cn': { label: 'TraeCN', color: '#2c9adf' }
 } as const
 
+function projectSelectionKey(source: ProjectStats['source'] | Session['source'], projectPath: string): string {
+  return `${source}:${projectPath}`
+}
+
 export default function SessionList(): JSX.Element {
-  const { projects, sessions, selectedSession, selectedProjectName, selectProject, searchQuery, setSearchQuery } = useStore()
+  const { projects, sessions, selectedSession, selectedProjectKey, selectProject, searchQuery, setSearchQuery } = useStore()
   const [filter, setFilter] = useState<'ALL' | 'success' | 'debug' | 'error'>('success')
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
 
-  const toggleProject = (projectName: string) => {
+  const toggleProject = (projectKey: string) => {
     const newExpanded = new Set(expandedProjects)
-    if (newExpanded.has(projectName)) {
-      newExpanded.delete(projectName)
+    if (newExpanded.has(projectKey)) {
+      newExpanded.delete(projectKey)
     } else {
-      newExpanded.add(projectName)
+      newExpanded.add(projectKey)
     }
     setExpandedProjects(newExpanded)
   }
@@ -33,8 +40,10 @@ export default function SessionList(): JSX.Element {
     })
   }, [projects, searchQuery])
 
-  const getFilteredSessionsForProject = (projectName: string) => {
-    let result = sessions.filter(s => s.projectName === projectName)
+  const getFilteredSessionsForProject = (project: ProjectStats) => {
+    let result = sessions.filter(
+      (s) => s.projectPath === project.path && s.source === project.source
+    )
     if (filter !== 'ALL') {
       result = result.filter(s => s.status === filter)
     }
@@ -76,11 +85,10 @@ export default function SessionList(): JSX.Element {
           <button
             key={f}
             onClick={() => setFilter(f)}
-            className={`flex-1 py-1 text-xs font-mono transition-colors ${
-              filter === f
-                ? 'text-neon-green bg-cyber-border'
-                : 'text-cyber-text-dim hover:text-cyber-text'
-            }`}
+            className={`flex-1 py-1 text-xs font-mono transition-colors ${filter === f
+              ? 'text-neon-green bg-cyber-border'
+              : 'text-cyber-text-dim hover:text-cyber-text'
+              }`}
             style={{ fontSize: '9px' }}
           >
             {f === 'ALL' ? 'ALL' : f === 'success' ? 'SUC' : f.toUpperCase().slice(0, 3)}
@@ -99,35 +107,37 @@ export default function SessionList(): JSX.Element {
           </div>
         ) : (
           filteredProjects.map((project) => {
-            const projectSessions = getFilteredSessionsForProject(project.name)
+            const projectSessions = getFilteredSessionsForProject(project)
             if (projectSessions.length === 0) return null
 
-            const isExpanded = expandedProjects.has(project.name)
-            const isProjectActive = selectedProjectName === project.name || selectedSession?.projectName === project.name
+            const pKey = projectSelectionKey(project.source, project.path)
+            const isExpanded = expandedProjects.has(pKey)
+            const isProjectActive =
+              selectedProjectKey === pKey ||
+              (selectedSession &&
+                projectSelectionKey(selectedSession.source, selectedSession.projectPath) === pKey)
 
             return (
-              <div key={project.name} className="border-b border-cyber-border border-opacity-50">
+              <div key={pKey} className="border-b border-cyber-border border-opacity-50">
                 {/* Project Header */}
-                <div 
-                  className={`px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${
-                    isProjectActive ? 'bg-cyber-border bg-opacity-30' : 'hover:bg-cyber-gray'
-                  }`}
+                <div
+                  className={`px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${isProjectActive ? 'bg-cyber-border bg-opacity-30' : 'hover:bg-cyber-gray'
+                    }`}
                   onClick={() => {
-                    selectProject(project.name)
-                    if (!isExpanded) toggleProject(project.name)
+                    selectProject(pKey)
                   }}
                 >
                   <div className="flex items-center gap-2 overflow-hidden">
-                    <button 
+                    <button
                       onClick={(e) => {
                         e.stopPropagation()
-                        toggleProject(project.name)
+                        toggleProject(pKey)
                       }}
                       className="text-cyber-text-dim hover:text-cyber-text w-4 h-4 flex items-center justify-center focus:outline-none"
                     >
                       {isExpanded ? '▼' : '▶'}
                     </button>
-                    <span 
+                    <span
                       className="text-xs font-mono truncate font-bold"
                       style={{ color: isProjectActive ? '#aaff00' : '#88bb88' }}
                     >

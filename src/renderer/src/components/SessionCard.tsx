@@ -1,6 +1,10 @@
 import type { Session } from '../types'
 import { useStore } from '../store'
 
+function projectSelectionKey(source: Session['source'], projectPath: string): string {
+  return `${source}:${projectPath}`
+}
+
 function formatRelativeTime(dateStr: string): string {
   const date = new Date(dateStr)
   const now = new Date()
@@ -29,8 +33,10 @@ const STATUS_CONFIG = {
 
 const SOURCE_CONFIG = {
   claude: { label: 'CLAUDE', color: '#5EAB07' },
-  trae: { label: 'TRAE', color: '#6AECE1' },
-  'trae-cn': { label: 'TRAECN', color: '#26CCC2' }
+  trae: {
+    label: 'TRAE', color: '#4cada5'
+  },
+  'trae-cn': { label: 'TRAECN', color: '#2c9adf' }
 } as const
 
 interface Props {
@@ -51,7 +57,7 @@ export default function SessionCard({ session, isSelected, isProjectSelected }: 
         : 'hover:bg-cyber-gray border-l-2 border-l-transparent'
         }`}
       onClick={() => {
-        selectProject(session.projectName)
+        selectProject(projectSelectionKey(session.source, session.projectPath))
       }}
     >
       {/* Header row */}

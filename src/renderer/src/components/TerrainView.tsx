@@ -31,14 +31,18 @@ const R_CAP_K = 1.55 // max ring radius = R_CAP_K × sigma
 
 const SOURCE_COLORS: Record<DataSource, string> = {
   claude: '#5EAB07',
-  trae: '#6AECE1',
-  'trae-cn': '#26CCC2'
+  trae: '#4cada5',
+  'trae-cn': '#2c9adf'
 }
 
 function sourceLabel(source: DataSource): string {
   if (source === 'claude') return 'Claude'
   if (source === 'trae') return 'Trae'
   return 'TraeCN'
+}
+
+function projectSelectionKey(source: DataSource, projectPath: string): string {
+  return `${source}:${projectPath}`
 }
 
 // ── Date / hour math ──────────────────────────────────────────────────────────
@@ -103,6 +107,7 @@ function repelMountains(mounts: { worldX: number; worldZ: number; sigma: number 
 
 interface Mountain {
   name: string; worldX: number; worldZ: number
+  path: string
   peakHeight: number; sigma: number
   promptCount: number; sessionCount: number; age: number
   toolDensity: number   // tool calls per prompt
@@ -110,35 +115,53 @@ interface Mountain {
   source: DataSource
 }
 
-function projectNameKey(source: DataSource, name: string): string {
-  return `${source}:${name}`
+function projectNameKey(source: DataSource, path: string): string {
+  return `${source}:${path}`
 }
 
 function buildMountains(
-  projects: ProjectStats[], sessions: Session[], dr: DateRange
+  projects: ProjectStats[], sessions: Session[], dr: DateRange, activeProjectKey?: string | null
 ): Mountain[] {
   if (!projects.length) return []
+  const sourcePriority: Record<DataSource, number> = { claude: 0, 'trae-cn': 1, trae: 2 }
 
   const firstTime = new Map<string, number>()
   for (const s of sessions) {
     const t = new Date(s.startTime).getTime()
-    const k = projectNameKey(s.source, s.projectName)
+    const k = projectNameKey(s.source, s.projectPath)
     if ((firstTime.get(k) ?? Infinity) > t)
       firstTime.set(k, t)
   }
 
-  const visible = [...projects]
-    .filter(p => firstTime.has(projectNameKey(p.source, p.name)))
+  const sorted = [...projects]
+    .filter(p => firstTime.has(projectNameKey(p.source, p.path)))
     .sort(
-      (a, b) =>
-        firstTime.get(projectNameKey(a.source, a.name))! -
-        firstTime.get(projectNameKey(b.source, b.name))!
+      (a, b) => {
+        const bySource = sourcePriority[a.source] - sourcePriority[b.source]
+        if (bySource !== 0) return bySource
+        return (
+          firstTime.get(projectNameKey(a.source, a.path))! -
+          firstTime.get(projectNameKey(b.source, b.path))!
+        )
+      }
     )
-    .slice(0, MAX_MT)
+  const visible = sorted.slice(0, MAX_MT)
+
+  if (activeProjectKey) {
+    const idx = sorted.findIndex((p) => projectSelectionKey(p.source, p.path) === activeProjectKey)
+    const activeProject = idx >= 0 ? sorted[idx] : null
+    const alreadyVisible = activeProject
+      ? visible.some((p) => projectSelectionKey(p.source, p.path) === activeProjectKey)
+      : false
+    if (activeProject && !alreadyVisible) {
+      if (visible.length < MAX_MT) visible.push(activeProject)
+      else visible[visible.length - 1] = activeProject
+    }
+  }
 
   if (!visible.length) return []
 
-  const ts = visible.map((p) => firstTime.get(projectNameKey(p.source, p.name))!)
+  const ts = visible.map((p) => firstTime.get(projectNameKey(p.source, p.path))!)
   const minT = Math.min(...ts)
   const maxT = Math.max(...ts)
   const tRange = Math.max(maxT - minT, 1)
@@ -155,7 +178,7 @@ function buildMountains(
   const avgHeight = rawHeights.reduce((a, b) => a + b, 0) / (rawHeights.length || 1)
 
   const result = visible.map((p, index) => {
-    const t = firstTime.get(projectNameKey(p.source, p.name))!
+    const t = firstTime.get(projectNameKey(p.source, p.path))!
     const d = new Date(t)
     const hour = d.getHours() + d.getMinutes() / 60
     const norm = p.promptCount / maxPc
@@ -169,6 +192,7 @@ function buildMountains(
 
     return {
       name: p.name,
+      path: p.path,
       worldX: toWorldX(d, dr),
       worldZ: toWorldZ(hour),
       peakHeight,
@@ -316,7 +340,7 @@ function findRadius(
 
 // ── Contour ring builder ──────────────────────────────────────────────────────
 
-interface ContourRing { pts: V3[]; color: string; mountainName: string }
+interface ContourRing { pts: V3[]; color: string; mountainKey: string }
 
 function buildContourRings(mounts: Mountain[]): ContourRing[] {
   const rings: ContourRing[] = []
@@ -345,11 +369,11 @@ function buildContourRings(mounts: Mountain[]): ContourRing[] {
       if (skip) continue
 
       const bright = 0.30 + 0.70 * frac
-      const base = new THREE.Color(SOURCE_COLORS[m.source])
+      const base = new THREE.Color(SOURCE_COLORS[m.source] || SOURCE_COLORS.claude)
       rings.push({
         pts,
         color: `rgb(${Math.round(base.r * 255 * bright)},${Math.round(base.g * 255 * bright)},${Math.round(base.b * 255 * bright)})`,
-        mountainName: m.name
+        mountainKey: projectSelectionKey(m.source, m.path)
       })
     }
   }
@@ -497,7 +521,7 @@ function HourLabels({ dr }: { dr: DateRange }) {
 
 /** Contour lines — each ring is its own closed Line for guaranteed continuity.
  *  All materials share the same dashOffset, driven by a single useFrame. */
-function ContourLines({ mounts, activeMountainName }: { mounts: Mountain[], activeMountainName: string | null }) {
+function ContourLines({ mounts, activeMountainKey }: { mounts: Mountain[]; activeMountainKey: string | null }) {
   const groupRef = useRef<THREE.Group>(null)
   const lineRefs = useRef<any[]>([])
   const rings = useMemo(() => {
@@ -514,7 +538,7 @@ function ContourLines({ mounts, activeMountainName }: { mounts: Mountain[], acti
 
     for (let i = 0; i < rings.length; i++) {
       const ring = rings[i]
-      const isActive = ring.mountainName === activeMountainName
+      const isActive = ring.mountainKey === activeMountainKey
       const speed = isActive ? 0.36 : 0.18
       offsets.current[i] -= delta * speed
 
@@ -627,10 +651,16 @@ function ToolParticles({ m, isActive }: { m: Mountain, isActive?: boolean }) {
   )
 }
 
-function EffectLayer({ mounts, activeMountainName }: { mounts: Mountain[], activeMountainName: string | null }) {
+function EffectLayer({ mounts, activeMountainKey }: { mounts: Mountain[]; activeMountainKey: string | null }) {
   return (
     <>
-      {mounts.map((m, i) => <ToolParticles key={i} m={m} isActive={m.name === activeMountainName} />)}
+      {mounts.map((m, i) => (
+        <ToolParticles
+          key={i}
+          m={m}
+          isActive={projectSelectionKey(m.source, m.path) === activeMountainKey}
+        />
+      ))}
     </>
   )
 }
@@ -737,13 +767,20 @@ function PeakLabels({ mounts }: { mounts: Mountain[] }) {
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export default function TerrainView(): JSX.Element {
-  const { sessions, projects, selectedProjectName, selectedSession } = useStore()
+  const { sessions, projects, selectedProjectKey, selectedSession } = useStore()
 
   const dr = useMemo(() => getDateRange(sessions), [sessions])
-  const mounts = useMemo(() => buildMountains(projects, sessions, dr), [projects, sessions, dr])
-
-  const activeProjectName = selectedProjectName || selectedSession?.projectName
-  const activeMountain = useMemo(() => mounts.find(m => m.name === activeProjectName), [mounts, activeProjectName])
+  const activeProjectKey =
+    selectedProjectKey ||
+    (selectedSession ? projectSelectionKey(selectedSession.source, selectedSession.projectPath) : null)
+  const mounts = useMemo(
+    () => buildMountains(projects, sessions, dr, activeProjectKey),
+    [projects, sessions, dr, activeProjectKey]
+  )
+  const activeMountain = useMemo(
+    () => mounts.find((m) => projectSelectionKey(m.source, m.path) === activeProjectKey),
+    [mounts, activeProjectKey]
+  )
 
   const firstDate = dr.minDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
   const lastDate = dr.maxDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
@@ -753,7 +790,7 @@ export default function TerrainView(): JSX.Element {
       <div className="absolute top-2 left-2 z-10 cyber-header text-cyber-text-dim py-1">
         ACTIVITY TERRAIN
       </div>
-      {activeProjectName && (
+      {activeProjectKey && (
         <button
           onClick={() => {
             useStore.getState().selectProject(null)
@@ -786,8 +823,8 @@ export default function TerrainView(): JSX.Element {
         <CoordinateAxes dr={dr} />
         <DateLabels dr={dr} />
         <HourLabels dr={dr} />
-        <ContourLines mounts={mounts} activeMountainName={activeProjectName || null} />
-        <EffectLayer mounts={mounts} activeMountainName={activeProjectName || null} />
+        <ContourLines mounts={mounts} activeMountainKey={activeProjectKey} />
+        <EffectLayer mounts={mounts} activeMountainKey={activeProjectKey} />
         <PeakLabels mounts={mounts} />
 
         <OrbitControls enablePan enableZoom enableRotate makeDefault

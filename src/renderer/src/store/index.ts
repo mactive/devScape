@@ -1,11 +1,15 @@
 import { create } from 'zustand'
 import type { Session, ProjectStats, HeatmapMode, HeatmapTimeRange } from '../types'
 
+function projectSelectionKey(source: Session['source'] | ProjectStats['source'], projectPath: string): string {
+  return `${source}:${projectPath}`
+}
+
 interface AppState {
   sessions: Session[]
   projects: ProjectStats[]
   selectedSession: Session | null
-  selectedProjectName: string | null
+  selectedProjectKey: string | null
   loadingDetail: boolean
   loading: boolean
   error: string | null
@@ -16,7 +20,7 @@ interface AppState {
 
   loadSessions: () => Promise<void>
   selectSession: (session: Session | null) => Promise<void>
-  selectProject: (name: string | null) => void
+  selectProject: (projectKey: string | null) => void
   setHeatmapMode: (mode: HeatmapMode) => void
   setHeatmapTimeRange: (range: HeatmapTimeRange) => void
   setHeatmapProject: (project: string) => void
@@ -34,7 +38,7 @@ export const useStore = create<AppState>((set, get) => ({
   sessions: [],
   projects: [],
   selectedSession: null,
-  selectedProjectName: null,
+  selectedProjectKey: null,
   loadingDetail: false,
   loading: false,
   error: null,
@@ -51,7 +55,7 @@ export const useStore = create<AppState>((set, get) => ({
       
       // Deduplicate projects by source + name
       const uniqueProjects = Array.from(
-        new Map((result.projects || []).map((p: ProjectStats) => [`${p.source}:${p.name}`, p])).values()
+        new Map((result.projects || []).map((p: ProjectStats) => [`${p.source}:${p.path}`, p])).values()
       ) as ProjectStats[]
       
       set({ sessions: result.sessions || [], projects: uniqueProjects, loading: false })
@@ -66,7 +70,11 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
     // Also select the corresponding project to ensure the terrain updates
-    set({ selectedSession: session, selectedProjectName: session.projectName, loadingDetail: true })
+    set({
+      selectedSession: session,
+      selectedProjectKey: projectSelectionKey(session.source, session.projectPath),
+      loadingDetail: true
+    })
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const detail = await (window as any).api.getSessionDetail(session.id)
@@ -80,7 +88,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  selectProject: (name) => set({ selectedProjectName: name }),
+  selectProject: (projectKey) => set({ selectedProjectKey: projectKey }),
 
   setHeatmapMode: (mode) => set({ heatmapMode: mode }),
   setHeatmapTimeRange: (range) => set({ heatmapTimeRange: range }),

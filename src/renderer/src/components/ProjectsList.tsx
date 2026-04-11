@@ -1,4 +1,5 @@
 import { useStore } from '../store'
+import type { ProjectStats, Session } from '../types'
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -13,17 +14,25 @@ const PROJECT_COLORS = [
 
 const SOURCE_CONFIG = {
   claude: { label: 'Claude', color: '#5EAB07' },
-  trae: { label: 'Trae', color: '#6AECE1' },
-  'trae-cn': { label: 'TraeCN', color: '#26CCC2' }
+  trae: {
+    label: 'Trae', color: '#4cada5'
+  },
+  'trae-cn': { label: 'TraeCN', color: '#2c9adf' }
 } as const
 
+function projectSelectionKey(source: ProjectStats['source'] | Session['source'], projectPath: string): string {
+  return `${source}:${projectPath}`
+}
+
 export default function ProjectsList(): JSX.Element {
-  const { projects, sessions, selectedProjectName, selectProject, selectSession, selectedSession } = useStore()
+  const { projects, sessions, selectedProjectKey, selectProject, selectSession, selectedSession } = useStore()
 
   const maxTokens = projects[0]?.totalTokens || 1
 
   // Determine the active project logic
-  const activeProjectName = selectedProjectName || selectedSession?.projectName
+  const activeProjectKey =
+    selectedProjectKey ||
+    (selectedSession ? projectSelectionKey(selectedSession.source, selectedSession.projectPath) : null)
 
   return (
     <div className="flex flex-col h-full bg-cyber-dark">
@@ -43,14 +52,15 @@ export default function ProjectsList(): JSX.Element {
           projects.map((project, i) => {
             const pct = (project.totalTokens / maxTokens) * 100
             const color = PROJECT_COLORS[i % PROJECT_COLORS.length]
-            const isActive = activeProjectName === project.name
+            const pKey = projectSelectionKey(project.source, project.path)
+            const isActive = activeProjectKey === pKey
 
             return (
               <div
                 key={`${project.path}-${i}`}
                 className={`mb-2 cursor-pointer group ${isActive ? 'opacity-100' : 'opacity-80 hover:opacity-100'}`}
                 onClick={() => {
-                  selectProject(isActive ? null : project.name)
+                  selectProject(isActive ? null : pKey)
                 }}
               >
                 {/* Project name */}
@@ -103,21 +113,29 @@ export default function ProjectsList(): JSX.Element {
                   <span style={{ fontSize: '8px', color: '#334433' }}>
                     {project.sessionCount}s · {project.promptCount}p
                   </span>
-                  
+
                   {isActive && (
-                    <button 
+                    <button
                       className="bg-cyber-accent text-black font-bold py-[2px] px-4 rounded-sm text-[8px] hover:bg-[#ccee22] transition-colors"
                       onClick={(e) => {
                         e.stopPropagation()
-                        if (selectedSession?.projectName === project.name) {
+                        if (
+                          selectedSession &&
+                          projectSelectionKey(selectedSession.source, selectedSession.projectPath) === pKey
+                        ) {
                           selectSession(null)
                         } else {
-                          const ps = sessions.find((s) => s.projectName === project.name)
+                          const ps = sessions.find(
+                            (s) => s.projectPath === project.path && s.source === project.source
+                          )
                           if (ps) selectSession(ps)
                         }
                       }}
                     >
-                      {selectedSession?.projectName === project.name ? 'CLOSE DETAIL' : 'DETAIL'}
+                      {selectedSession &&
+                        projectSelectionKey(selectedSession.source, selectedSession.projectPath) === pKey
+                        ? 'CLOSE DETAIL'
+                        : 'DETAIL'}
                     </button>
                   )}
                 </div>
