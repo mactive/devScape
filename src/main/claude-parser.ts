@@ -1,6 +1,9 @@
 import { readFileSync, readdirSync, existsSync, statSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { homedir } from 'os'
+import { execFileSync } from 'child_process'
+
+export type DataSource = 'claude' | 'trae' | 'trae-cn'
 
 export interface RawMessage {
   uuid?: string
@@ -47,6 +50,7 @@ export interface ParsedMessage {
 
 export interface Session {
   id: string
+  source: DataSource
   projectPath: string
   projectName: string
   startTime: string
@@ -67,6 +71,7 @@ export interface Session {
 export interface ProjectStats {
   name: string
   path: string
+  source: DataSource
   totalTokens: number
   sessionCount: number
   promptCount: number
@@ -75,6 +80,175 @@ export interface ProjectStats {
   bashCallCount: number
   toolDensity: number
   bashRatio: number
+}
+
+interface TraeInputHistoryItem {
+  inputText?: string
+}
+
+function parseJsonSafely<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
+function decodeFileUriPath(uri: string): string {
+  if (!uri.startsWith('file://')) return uri
+  try {
+    return decodeURIComponent(uri.replace(/^file:\/\//, ''))
+  } catch {
+    return uri.replace(/^file:\/\//, '')
+  }
+}
+
+function sqliteQueryAsJson(dbPath: string, sql: string): Array<Record<string, unknown>> {
+  try {
+    const out = execFileSync('sqlite3', ['-json', dbPath, sql], { encoding: 'utf-8' })
+    if (!out.trim()) return []
+    return parseJsonSafely<Array<Record<string, unknown>>>(out, [])
+  } catch {
+    return []
+  }
+}
+
+function projectKey(source: DataSource, path: string): string {
+  return `${source}:${path}`
+}
+
+function parseTraeSessions(): { sessions: Session[]; projects: ProjectStats[] } {
+  const userHome = homedir()
+  const traeUserDirs: Array<{ app: DataSource; dir: string }> = [
+    { app: 'trae', dir: join(userHome, 'Library', 'Application Support', 'Trae', 'User') },
+    { app: 'trae-cn', dir: join(userHome, 'Library', 'Application Support', 'Trae CN', 'User') }
+  ]
+
+  const sessions: Session[] = []
+  const projectMap = new Map<string, ProjectStats>()
+
+  for (const { app, dir } of traeUserDirs) {
+    const workspaceStorageDir = join(dir, 'workspaceStorage')
+    if (!existsSync(workspaceStorageDir)) continue
+
+    let workspaceDirs: string[] = []
+    try {
+      workspaceDirs = readdirSync(workspaceStorageDir).filter((d) => {
+        try {
+          return statSync(join(workspaceStorageDir, d)).isDirectory()
+        } catch {
+          return false
+        }
+      })
+    } catch {
+      continue
+    }
+
+    for (const workspaceDirName of workspaceDirs) {
+      const workspaceDirPath = join(workspaceStorageDir, workspaceDirName)
+      const dbPath = join(workspaceDirPath, 'state.vscdb')
+      if (!existsSync(dbPath)) continue
+
+      const workspaceJsonPath = join(workspaceDirPath, 'workspace.json')
+      let projectPath = workspaceDirName
+      if (existsSync(workspaceJsonPath)) {
+        try {
+          const workspaceJson = parseJsonSafely<{ folder?: string }>(
+            readFileSync(workspaceJsonPath, 'utf-8'),
+            {}
+          )
+          if (workspaceJson.folder) {
+            projectPath = decodeFileUriPath(workspaceJson.folder)
+          }
+        } catch {
+          // Keep fallback project path
+        }
+      }
+      const projectName = basename(projectPath) || workspaceDirName
+
+      const rows = sqliteQueryAsJson(
+        dbPath,
+        "SELECT CAST(value AS TEXT) AS value FROM ItemTable WHERE key='icube-ai-agent-storage-input-history' LIMIT 1;"
+      )
+      if (rows.length === 0 || typeof rows[0].value !== 'string') continue
+
+      const inputHistory = parseJsonSafely<TraeInputHistoryItem[]>(rows[0].value as string, [])
+      if (!Array.isArray(inputHistory) || inputHistory.length === 0) continue
+
+      let dbMtime = new Date()
+      try {
+        dbMtime = statSync(dbPath).mtime
+      } catch {
+        // Keep fallback timestamp
+      }
+
+      let workspacePromptCount = 0
+      for (let i = 0; i < inputHistory.length; i++) {
+        const item = inputHistory[i]
+        const text = typeof item?.inputText === 'string' ? item.inputText.trim() : ''
+        if (!text) continue
+
+        workspacePromptCount++
+        const ts = new Date(dbMtime.getTime() - (inputHistory.length - i - 1) * 1000).toISOString()
+
+        sessions.push({
+          id: `trae:${app}:${workspaceDirName}:${i}`,
+          source: app,
+          projectPath,
+          projectName,
+          startTime: ts,
+          endTime: ts,
+          firstPrompt: text.substring(0, 300),
+          lastPrompt: text.substring(0, 300),
+          promptCount: 1,
+          totalTokens: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheTokens: 0,
+          status: 'success',
+          linesAdded: 0,
+          linesRemoved: 0,
+          messages: [
+            {
+              role: 'user',
+              content: text,
+              timestamp: ts
+            }
+          ]
+        })
+      }
+
+      if (workspacePromptCount > 0) {
+        const pKey = projectKey(app, projectPath)
+        const existing = projectMap.get(pKey) || {
+          name: projectName,
+          path: projectPath,
+          source: app,
+          totalTokens: 0,
+          sessionCount: 0,
+          promptCount: 0,
+          lastActive: dbMtime.toISOString(),
+          toolCallCount: 0,
+          bashCallCount: 0,
+          toolDensity: 0,
+          bashRatio: 0
+        }
+        existing.sessionCount += workspacePromptCount
+        existing.promptCount += workspacePromptCount
+        if (dbMtime.toISOString() > existing.lastActive) {
+          existing.lastActive = dbMtime.toISOString()
+        }
+        projectMap.set(pKey, existing)
+      }
+    }
+  }
+
+  const projects = Array.from(projectMap.values())
+  for (const p of projects) {
+    p.toolDensity = 0
+    p.bashRatio = 0
+  }
+  return { sessions, projects }
 }
 
 function decodeDirName(dirName: string): string {
@@ -125,9 +299,15 @@ function countLinesFromMessages(messages: RawMessage[]): { added: number; remove
 
 export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectStats[] } {
   const claudeDir = join(homedir(), '.claude', 'projects')
+  const traeData = parseTraeSessions()
 
   if (!existsSync(claudeDir)) {
-    return { sessions: [], projects: [] }
+    return {
+      sessions: traeData.sessions.sort(
+        (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+      ),
+      projects: traeData.projects.sort((a, b) => b.totalTokens - a.totalTokens)
+    }
   }
 
   const sessions: Session[] = []
@@ -143,7 +323,12 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
       }
     })
   } catch {
-    return { sessions: [], projects: [] }
+    return {
+      sessions: traeData.sessions.sort(
+        (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+      ),
+      projects: traeData.projects.sort((a, b) => b.totalTokens - a.totalTokens)
+    }
   }
 
   for (const projectDirName of projectDirs) {
@@ -266,6 +451,7 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
 
         const session: Session = {
           id: sessionId,
+          source: 'claude',
           projectPath,
           projectName,
           startTime: startTime.toISOString(),
@@ -285,9 +471,11 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
 
         sessions.push(session)
 
-        const existing = projectMap.get(projectPath) || {
+        const pKey = projectKey('claude', projectPath)
+        const existing = projectMap.get(pKey) || {
           name: projectName,
           path: projectPath,
+          source: 'claude',
           totalTokens: 0,
           sessionCount: 0,
           promptCount: 0,
@@ -305,26 +493,54 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
         if (session.endTime > existing.lastActive) {
           existing.lastActive = session.endTime
         }
-        projectMap.set(projectPath, existing)
+        projectMap.set(pKey, existing)
       } catch {
         // Skip unreadable files
       }
     }
   }
 
-  sessions.sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
-
   const projects = Array.from(projectMap.values())
   for (const p of projects) {
     p.toolDensity = p.promptCount > 0 ? p.toolCallCount / p.promptCount : 0
-    p.bashRatio   = p.toolCallCount > 0 ? p.bashCallCount / p.toolCallCount : 0
+    p.bashRatio = p.toolCallCount > 0 ? p.bashCallCount / p.toolCallCount : 0
   }
-  projects.sort((a, b) => b.totalTokens - a.totalTokens)
 
-  return { sessions, projects }
+  sessions.push(...traeData.sessions)
+  for (const p of traeData.projects) {
+    const pKey = projectKey(p.source, p.path)
+    const existing = projectMap.get(pKey)
+    if (existing) {
+      existing.totalTokens += p.totalTokens
+      existing.sessionCount += p.sessionCount
+      existing.promptCount += p.promptCount
+      existing.toolCallCount += p.toolCallCount
+      existing.bashCallCount += p.bashCallCount
+      if (p.lastActive > existing.lastActive) {
+        existing.lastActive = p.lastActive
+      }
+      existing.toolDensity = existing.promptCount > 0 ? existing.toolCallCount / existing.promptCount : 0
+      existing.bashRatio = existing.toolCallCount > 0 ? existing.bashCallCount / existing.toolCallCount : 0
+    } else {
+      projectMap.set(pKey, p)
+    }
+  }
+
+  sessions.sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
+  const mergedProjects = Array.from(projectMap.values())
+  mergedProjects.sort((a, b) => b.totalTokens - a.totalTokens)
+
+  return { sessions, projects: mergedProjects }
 }
 
-export function parseSessionDetail(sessionId: string, projectDirName: string): ParsedMessage[] {
+export function parseSessionDetail(sessionId: string, projectDirName?: string): ParsedMessage[] {
+  if (sessionId.startsWith('trae:')) {
+    const traeSessions = parseTraeSessions().sessions
+    const session = traeSessions.find((s) => s.id === sessionId)
+    return session?.messages || []
+  }
+
+  if (!projectDirName) return []
   const claudeDir = join(homedir(), '.claude', 'projects')
   const filePath = join(claudeDir, projectDirName, `${sessionId}.jsonl`)
 

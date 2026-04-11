@@ -54,6 +54,12 @@ ipcMain.handle('get-sessions', async () => {
 
 ipcMain.handle('get-session-detail', async (_, sessionId: string) => {
   try {
+    // Trae session IDs are resolved directly by parser without Claude project lookup.
+    const directMessages = parseSessionDetail(sessionId)
+    if (directMessages.length > 0) {
+      return { messages: directMessages }
+    }
+
     const claudeDir = join(homedir(), '.claude', 'projects')
     if (!existsSync(claudeDir)) return null
 

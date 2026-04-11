@@ -11,6 +11,12 @@ const PROJECT_COLORS = [
   '#00ff88', '#00dd66', '#00bb44', '#009922', '#007700'
 ]
 
+const SOURCE_CONFIG = {
+  claude: { label: 'Claude', color: '#5EAB07' },
+  trae: { label: 'Trae', color: '#6AECE1' },
+  'trae-cn': { label: 'TraeCN', color: '#26CCC2' }
+} as const
+
 export default function ProjectsList(): JSX.Element {
   const { projects, sessions, selectedProjectName, selectProject, selectSession, selectedSession } = useStore()
 
@@ -49,16 +55,28 @@ export default function ProjectsList(): JSX.Element {
               >
                 {/* Project name */}
                 <div className="flex items-center justify-between mb-0.5">
-                  <span
-                    className="font-mono truncate"
-                    style={{
-                      fontSize: '9px',
-                      color: isActive ? '#aaff00' : '#668866',
-                      maxWidth: '120px'
-                    }}
-                  >
-                    {project.name}
-                  </span>
+                  <div className="flex items-center gap-1 overflow-hidden">
+                    <span
+                      className="font-mono truncate"
+                      style={{
+                        fontSize: '9px',
+                        color: isActive ? '#aaff00' : '#668866',
+                        maxWidth: '88px'
+                      }}
+                    >
+                      {project.name}
+                    </span>
+                    <span
+                      className="font-mono border rounded-sm px-1 py-[1px] flex-shrink-0"
+                      style={{
+                        fontSize: '7px',
+                        color: SOURCE_CONFIG[project.source].color,
+                        borderColor: `${SOURCE_CONFIG[project.source].color}88`
+                      }}
+                    >
+                      {SOURCE_CONFIG[project.source].label}
+                    </span>
+                  </div>
                   <span
                     className="font-mono flex-shrink-0 ml-1"
                     style={{ fontSize: '9px', color: '#446644' }}

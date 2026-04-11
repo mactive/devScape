@@ -49,9 +49,9 @@ export const useStore = create<AppState>((set, get) => ({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await (window as any).api.getSessions()
       
-      // Deduplicate projects by name
+      // Deduplicate projects by source + name
       const uniqueProjects = Array.from(
-        new Map((result.projects || []).map((p: ProjectStats) => [p.name, p])).values()
+        new Map((result.projects || []).map((p: ProjectStats) => [`${p.source}:${p.name}`, p])).values()
       ) as ProjectStats[]
       
       set({ sessions: result.sessions || [], projects: uniqueProjects, loading: false })

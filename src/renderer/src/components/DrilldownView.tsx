@@ -26,6 +26,12 @@ export default function DrilldownView(): JSX.Element {
   if (!selectedSession) return <></>
 
   const messages = selectedSession.messages || []
+  const sourceConfig = {
+    claude: { label: 'CLAUDE CODE', color: '#5EAB07' },
+    trae: { label: 'TRAE', color: '#6AECE1' },
+    'trae-cn': { label: 'TRAE CN', color: '#26CCC2' }
+  } as const
+  const activeSource = sourceConfig[selectedSession.source]
 
   return (
     <div className="flex flex-col h-full bg-cyber-dark">
@@ -33,7 +39,7 @@ export default function DrilldownView(): JSX.Element {
       <div className="flex items-center justify-between px-4 py-2 border-b border-cyber-border flex-shrink-0">
         <div className="flex items-center gap-3">
           <span className="text-neon-green font-mono text-xs font-bold tracking-widest">
-            CLAUDE CODE
+            <span style={{ color: activeSource.color }}>{activeSource.label}</span>
           </span>
           <span className="text-cyber-muted font-mono text-xs">|</span>
           <span className="text-cyber-text font-mono text-xs truncate max-w-xs">

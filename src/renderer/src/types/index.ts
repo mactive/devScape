@@ -1,3 +1,5 @@
+export type DataSource = 'claude' | 'trae' | 'trae-cn'
+
 export interface ParsedMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
@@ -11,6 +13,7 @@ export interface ParsedMessage {
 
 export interface Session {
   id: string
+  source: DataSource
   projectPath: string
   projectName: string
   startTime: string
@@ -31,6 +34,7 @@ export interface Session {
 export interface ProjectStats {
   name: string
   path: string
+  source: DataSource
   totalTokens: number
   sessionCount: number
   promptCount: number

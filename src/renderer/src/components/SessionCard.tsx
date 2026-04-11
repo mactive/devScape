@@ -27,6 +27,12 @@ const STATUS_CONFIG = {
   error: { color: '#ff4444', label: 'ERR' }
 }
 
+const SOURCE_CONFIG = {
+  claude: { label: 'CLAUDE', color: '#5EAB07' },
+  trae: { label: 'TRAE', color: '#6AECE1' },
+  'trae-cn': { label: 'TRAECN', color: '#26CCC2' }
+} as const
+
 interface Props {
   session: Session
   isSelected: boolean
@@ -36,6 +42,7 @@ interface Props {
 export default function SessionCard({ session, isSelected, isProjectSelected }: Props): JSX.Element {
   const { selectSession, selectProject } = useStore()
   const statusCfg = STATUS_CONFIG[session.status]
+  const sourceCfg = SOURCE_CONFIG[session.source]
 
   return (
     <div
@@ -63,6 +70,16 @@ export default function SessionCard({ session, isSelected, isProjectSelected }: 
             style={{ color: statusCfg.color, fontSize: '9px', opacity: 0.8 }}
           >
             {statusCfg.label}
+          </span>
+          <span
+            className="text-xs font-mono px-1 py-[1px] border rounded-sm"
+            style={{
+              color: sourceCfg.color,
+              borderColor: `${sourceCfg.color}88`,
+              fontSize: '8px'
+            }}
+          >
+            {sourceCfg.label}
           </span>
         </div>
         <span className="text-cyber-text-dim text-xs flex-shrink-0 ml-1">

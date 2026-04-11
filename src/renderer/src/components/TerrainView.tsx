@@ -16,7 +16,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Billboard, Text, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '../store'
-import type { Session, ProjectStats } from '../types'
+import type { DataSource, Session, ProjectStats } from '../types'
 
 // ── World constants ───────────────────────────────────────────────────────────
 
@@ -28,6 +28,18 @@ const MAX_H = 8
 const MAX_MT = 28
 const MAX_RINGS = 10   // contour rings per mountain
 const R_CAP_K = 1.55 // max ring radius = R_CAP_K × sigma
+
+const SOURCE_COLORS: Record<DataSource, string> = {
+  claude: '#5EAB07',
+  trae: '#6AECE1',
+  'trae-cn': '#26CCC2'
+}
+
+function sourceLabel(source: DataSource): string {
+  if (source === 'claude') return 'Claude'
+  if (source === 'trae') return 'Trae'
+  return 'TraeCN'
+}
 
 // ── Date / hour math ──────────────────────────────────────────────────────────
 
@@ -95,6 +107,11 @@ interface Mountain {
   promptCount: number; sessionCount: number; age: number
   toolDensity: number   // tool calls per prompt
   bashRatio: number     // bash / total tool calls, 0..1
+  source: DataSource
+}
+
+function projectNameKey(source: DataSource, name: string): string {
+  return `${source}:${name}`
 }
 
 function buildMountains(
@@ -105,18 +122,23 @@ function buildMountains(
   const firstTime = new Map<string, number>()
   for (const s of sessions) {
     const t = new Date(s.startTime).getTime()
-    if ((firstTime.get(s.projectName) ?? Infinity) > t)
-      firstTime.set(s.projectName, t)
+    const k = projectNameKey(s.source, s.projectName)
+    if ((firstTime.get(k) ?? Infinity) > t)
+      firstTime.set(k, t)
   }
 
   const visible = [...projects]
-    .filter(p => firstTime.has(p.name))
-    .sort((a, b) => firstTime.get(a.name)! - firstTime.get(b.name)!)
+    .filter(p => firstTime.has(projectNameKey(p.source, p.name)))
+    .sort(
+      (a, b) =>
+        firstTime.get(projectNameKey(a.source, a.name))! -
+        firstTime.get(projectNameKey(b.source, b.name))!
+    )
     .slice(0, MAX_MT)
 
   if (!visible.length) return []
 
-  const ts = visible.map(p => firstTime.get(p.name)!)
+  const ts = visible.map((p) => firstTime.get(projectNameKey(p.source, p.name))!)
   const minT = Math.min(...ts)
   const maxT = Math.max(...ts)
   const tRange = Math.max(maxT - minT, 1)
@@ -133,7 +155,7 @@ function buildMountains(
   const avgHeight = rawHeights.reduce((a, b) => a + b, 0) / (rawHeights.length || 1)
 
   const result = visible.map((p, index) => {
-    const t = firstTime.get(p.name)!
+    const t = firstTime.get(projectNameKey(p.source, p.name))!
     const d = new Date(t)
     const hour = d.getHours() + d.getMinutes() / 60
     const norm = p.promptCount / maxPc
@@ -156,6 +178,7 @@ function buildMountains(
       age: 1 - (t - minT) / tRange,
       toolDensity: p.toolDensity ?? 0,
       bashRatio: p.bashRatio ?? 0,
+      source: p.source
     }
   })
 
@@ -295,9 +318,6 @@ function findRadius(
 
 interface ContourRing { pts: V3[]; color: string; mountainName: string }
 
-// #5EAB07 = rgb(94, 171, 7)
-const CONTOUR_R = 94, CONTOUR_G = 171, CONTOUR_B = 7
-
 function buildContourRings(mounts: Mountain[]): ContourRing[] {
   const rings: ContourRing[] = []
   for (const m of mounts) {
@@ -325,9 +345,10 @@ function buildContourRings(mounts: Mountain[]): ContourRing[] {
       if (skip) continue
 
       const bright = 0.30 + 0.70 * frac
+      const base = new THREE.Color(SOURCE_COLORS[m.source])
       rings.push({
         pts,
-        color: `rgb(${Math.round(CONTOUR_R * bright)},${Math.round(CONTOUR_G * bright)},${Math.round(CONTOUR_B * bright)})`,
+        color: `rgb(${Math.round(base.r * 255 * bright)},${Math.round(base.g * 255 * bright)},${Math.round(base.b * 255 * bright)})`,
         mountainName: m.name
       })
     }
@@ -751,6 +772,9 @@ export default function TerrainView(): JSX.Element {
         <span><span style={{ color: '#aaff00' }}>X</span>=date</span>
         <span><span style={{ color: '#aaff00' }}>Z</span>=hour</span>
         <span><span style={{ color: '#aaff00' }}>↑</span>=prompts</span>
+        <span><span style={{ color: SOURCE_COLORS.claude }}>●</span>={sourceLabel('claude')}</span>
+        <span><span style={{ color: SOURCE_COLORS.trae }}>●</span>={sourceLabel('trae')}</span>
+        <span><span style={{ color: SOURCE_COLORS['trae-cn'] }}>●</span>={sourceLabel('trae-cn')}</span>
         <span><span style={{ color: '#88ddff' }}>●</span>=tool density</span>
         <span><span style={{ color: '#ff6414' }}>○</span>=bash ratio</span>
       </div>
@@ -776,7 +800,9 @@ export default function TerrainView(): JSX.Element {
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center text-cyber-text-dim">
             <p className="text-sm font-mono">NO SESSION DATA</p>
-            <p className="text-xs mt-1" style={{ fontSize: '10px' }}>Ensure ~/.claude/projects/ exists</p>
+            <p className="text-xs mt-1" style={{ fontSize: '10px' }}>
+              Ensure Claude/Trae local history exists
+            </p>
           </div>
         </div>
       )}

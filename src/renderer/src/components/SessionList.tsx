@@ -2,6 +2,12 @@ import { useState, useMemo } from 'react'
 import { useStore } from '../store'
 import SessionCard from './SessionCard'
 
+const SOURCE_CONFIG = {
+  claude: { label: 'Claude', color: '#5EAB07' },
+  trae: { label: 'Trae', color: '#6AECE1' },
+  'trae-cn': { label: 'TraeCN', color: '#26CCC2' }
+} as const
+
 export default function SessionList(): JSX.Element {
   const { projects, sessions, selectedSession, selectedProjectName, selectProject, searchQuery, setSearchQuery } = useStore()
   const [filter, setFilter] = useState<'ALL' | 'success' | 'debug' | 'error'>('success')
@@ -126,6 +132,16 @@ export default function SessionList(): JSX.Element {
                       style={{ color: isProjectActive ? '#aaff00' : '#88bb88' }}
                     >
                       {project.name}
+                    </span>
+                    <span
+                      className="font-mono border rounded-sm px-1 py-[1px] flex-shrink-0"
+                      style={{
+                        fontSize: '7px',
+                        color: SOURCE_CONFIG[project.source].color,
+                        borderColor: `${SOURCE_CONFIG[project.source].color}88`
+                      }}
+                    >
+                      {SOURCE_CONFIG[project.source].label}
                     </span>
                   </div>
                   <span className="text-cyber-text-dim" style={{ fontSize: '9px' }}>
