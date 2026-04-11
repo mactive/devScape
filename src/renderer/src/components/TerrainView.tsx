@@ -725,7 +725,7 @@ function CameraRig({ activeMountain }: { activeMountain?: Mountain }) {
 
 /** HUD-style peak labels: vertical stem line + bracket box */
 function PeakLabels({ mounts }: { mounts: Mountain[] }) {
-  const top = [...mounts].sort((a, b) => b.peakHeight - a.peakHeight).slice(0, 14)
+  const top = [...mounts].sort((a, b) => b.peakHeight - a.peakHeight)
   return (
     <>
       {top.map((m, i) => {
