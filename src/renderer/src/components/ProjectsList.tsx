@@ -25,9 +25,21 @@ function projectSelectionKey(source: ProjectStats['source'] | Session['source'],
 }
 
 export default function ProjectsList(): JSX.Element {
-  const { projects, sessions, selectedProjectKey, selectProject, selectSession, selectedSession } = useStore()
+  const {
+    projects,
+    sessions,
+    selectedProjectKey,
+    selectProject,
+    selectSession,
+    selectedSession,
+    sourceFilter
+  } = useStore()
 
-  const maxTokens = projects[0]?.totalTokens || 1
+  const visibleProjects = sourceFilter === 'ALL'
+    ? projects
+    : projects.filter((p) => p.source === sourceFilter)
+
+  const maxTokens = visibleProjects[0]?.totalTokens || 1
 
   // Determine the active project logic
   const activeProjectKey =
@@ -39,17 +51,17 @@ export default function ProjectsList(): JSX.Element {
       {/* Header */}
       <div className="cyber-header flex items-center justify-between flex-shrink-0">
         <span>PROJECTS</span>
-        <span className="text-cyber-muted">{projects.length} TOTAL</span>
+        <span className="text-cyber-muted">{visibleProjects.length} TOTAL</span>
       </div>
 
       {/* Project list */}
       <div className="flex-1 overflow-y-auto px-2 py-1">
-        {projects.length === 0 ? (
+        {visibleProjects.length === 0 ? (
           <div className="flex items-center justify-center h-16 text-cyber-text-dim text-xs">
             NO DATA
           </div>
         ) : (
-          projects.map((project, i) => {
+          visibleProjects.map((project, i) => {
             const pct = (project.totalTokens / maxTokens) * 100
             const color = PROJECT_COLORS[i % PROJECT_COLORS.length]
             const pKey = projectSelectionKey(project.source, project.path)

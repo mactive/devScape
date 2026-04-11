@@ -767,15 +767,24 @@ function PeakLabels({ mounts }: { mounts: Mountain[] }) {
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export default function TerrainView(): JSX.Element {
-  const { sessions, projects, selectedProjectKey, selectedSession } = useStore()
+  const { sessions, projects, selectedProjectKey, selectedSession, sourceFilter } = useStore()
 
-  const dr = useMemo(() => getDateRange(sessions), [sessions])
+  const visibleSessions = useMemo(
+    () => sourceFilter === 'ALL' ? sessions : sessions.filter((s) => s.source === sourceFilter),
+    [sessions, sourceFilter]
+  )
+  const visibleProjects = useMemo(
+    () => sourceFilter === 'ALL' ? projects : projects.filter((p) => p.source === sourceFilter),
+    [projects, sourceFilter]
+  )
+
+  const dr = useMemo(() => getDateRange(visibleSessions), [visibleSessions])
   const activeProjectKey =
     selectedProjectKey ||
     (selectedSession ? projectSelectionKey(selectedSession.source, selectedSession.projectPath) : null)
   const mounts = useMemo(
-    () => buildMountains(projects, sessions, dr, activeProjectKey),
-    [projects, sessions, dr, activeProjectKey]
+    () => buildMountains(visibleProjects, visibleSessions, dr, activeProjectKey),
+    [visibleProjects, visibleSessions, dr, activeProjectKey]
   )
   const activeMountain = useMemo(
     () => mounts.find((m) => projectSelectionKey(m.source, m.path) === activeProjectKey),
@@ -833,12 +842,15 @@ export default function TerrainView(): JSX.Element {
         <fog attach="fog" args={['#020702', 55, 120]} />
       </Canvas>
 
-      {sessions.length === 0 && (
+      {visibleSessions.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center text-cyber-text-dim">
             <p className="text-sm font-mono">NO SESSION DATA</p>
             <p className="text-xs mt-1" style={{ fontSize: '10px' }}>
-              Ensure Claude/Trae local history exists
+              {sourceFilter === 'ALL'
+                ? 'Ensure Claude/Trae local history exists'
+                : `No data for ${sourceLabel(sourceFilter)}`
+              }
             </p>
           </div>
         </div>

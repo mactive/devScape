@@ -1,4 +1,4 @@
-# DevScape — SESSION PULSER
+# DevScape — Project SESSION PULSER
 
 > 一个赛博朋克风格的桌面仪表盘，将你的 AI 辅助开发历程可视化为炫酷的 3D 地形图。
 

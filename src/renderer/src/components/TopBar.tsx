@@ -52,12 +52,12 @@ export default function TopBar(): JSX.Element {
       style={{ height: '42px', WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       {/* Left: Title */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4" style={{ marginLeft: '80px' }}>
         <span
           className="text-neon-green font-mono font-bold tracking-widest text-sm glitch-text neon-text"
           style={{ letterSpacing: '0.2em' }}
         >
-          SESSION PULSER
+          DevScape
         </span>
         {loading && (
           <span className="text-cyber-text-dim text-xs blink">LOADING...</span>
@@ -80,7 +80,7 @@ export default function TopBar(): JSX.Element {
         <MetricItem label="tokens" value={tokens} />
       </div>
 
-      {/* Right: Date/Time + Window Controls */}
+      {/* Right: Date/Time */}
       <div
         className="flex items-center gap-4 text-xs font-mono"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -95,7 +95,6 @@ export default function TopBar(): JSX.Element {
         >
           ↻
         </button>
-        <WindowControls />
       </div>
     </div>
   )
@@ -123,30 +122,5 @@ function MetricItem({
         <AnimatedNumber value={value} format={format} />
       </span>
     </span>
-  )
-}
-
-function WindowControls() {
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        className="w-3 h-3 rounded-full bg-cyber-muted hover:bg-neon-debug transition-colors"
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        onClick={() => (window as any).api?.windowMinimize()}
-        title="Minimize"
-      />
-      <button
-        className="w-3 h-3 rounded-full bg-cyber-muted hover:bg-neon-green transition-colors"
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        onClick={() => (window as any).api?.windowMaximize()}
-        title="Maximize"
-      />
-      <button
-        className="w-3 h-3 rounded-full bg-cyber-muted hover:bg-neon-error transition-colors"
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        onClick={() => (window as any).api?.windowClose()}
-        title="Close"
-      />
-    </div>
   )
 }

@@ -449,6 +449,9 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
           status = 'debug'
         }
 
+        // Only keep successful sessions in the unified dataset.
+        if (status !== 'success') continue
+
         const session: Session = {
           id: sessionId,
           source: 'claude',

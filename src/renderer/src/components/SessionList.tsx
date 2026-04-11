@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useStore } from '../store'
 import SessionCard from './SessionCard'
-import type { ProjectStats, Session } from '../types'
+import type { DataSource, ProjectStats, Session } from '../types'
 
 const SOURCE_CONFIG = {
   claude: { label: 'Claude', color: '#5EAB07' },
@@ -16,8 +16,17 @@ function projectSelectionKey(source: ProjectStats['source'] | Session['source'],
 }
 
 export default function SessionList(): JSX.Element {
-  const { projects, sessions, selectedSession, selectedProjectKey, selectProject, searchQuery, setSearchQuery } = useStore()
-  const [filter, setFilter] = useState<'ALL' | 'success' | 'debug' | 'error'>('success')
+  const {
+    projects,
+    sessions,
+    selectedSession,
+    selectedProjectKey,
+    selectProject,
+    searchQuery,
+    setSearchQuery,
+    sourceFilter,
+    setSourceFilter
+  } = useStore()
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
 
   const toggleProject = (projectKey: string) => {
@@ -31,47 +40,45 @@ export default function SessionList(): JSX.Element {
   }
 
   const filteredProjects = useMemo(() => {
-    return projects.filter(p => {
+    return projects.filter((p) => {
+      if (sourceFilter !== 'ALL' && p.source !== sourceFilter) return false
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase()
-        return p.name.toLowerCase().includes(q)
+        return (
+          p.name.toLowerCase().includes(q) ||
+          p.path.toLowerCase().includes(q)
+        )
       }
       return true
     })
-  }, [projects, searchQuery])
+  }, [projects, searchQuery, sourceFilter])
 
   const getFilteredSessionsForProject = (project: ProjectStats) => {
-    let result = sessions.filter(
+    return sessions.filter(
       (s) => s.projectPath === project.path && s.source === project.source
     )
-    if (filter !== 'ALL') {
-      result = result.filter(s => s.status === filter)
-    }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase()
-      result = result.filter(
-        (s) =>
-          s.firstPrompt.toLowerCase().includes(q) ||
-          s.lastPrompt.toLowerCase().includes(q) ||
-          s.projectName.toLowerCase().includes(q)
-      )
-    }
-    return result
   }
+
+  const sourceTabs: Array<{ value: 'ALL' | DataSource; label: string; short: string }> = [
+    { value: 'ALL', label: 'ALL', short: 'ALL' },
+    { value: 'claude', label: 'Claude', short: 'CLD' },
+    { value: 'trae', label: 'Trae', short: 'TRAE' },
+    { value: 'trae-cn', label: 'TraeCN', short: 'TCN' }
+  ]
 
   return (
     <div className="flex flex-col h-full bg-cyber-dark">
       {/* Header */}
       <div className="cyber-header flex items-center justify-between flex-shrink-0">
-        <span>SESSIONS</span>
-        <span className="text-cyber-muted">{sessions.length} TOTAL</span>
+        <span>PROJECTS</span>
+        <span className="text-cyber-muted">{filteredProjects.length} TOTAL</span>
       </div>
 
       {/* Search */}
       <div className="px-2 py-1.5 border-b border-cyber-border flex-shrink-0">
         <input
           type="text"
-          placeholder="search sessions..."
+          placeholder="search projects..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           className="w-full bg-transparent text-xs font-mono text-cyber-text placeholder-cyber-text-dim outline-none border border-cyber-border px-2 py-1"
@@ -81,17 +88,18 @@ export default function SessionList(): JSX.Element {
 
       {/* Filter tabs */}
       <div className="flex border-b border-cyber-border flex-shrink-0">
-        {(['ALL', 'success', 'debug', 'error'] as const).map((f) => (
+        {sourceTabs.map((tab) => (
           <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`flex-1 py-1 text-xs font-mono transition-colors ${filter === f
+            key={tab.value}
+            onClick={() => setSourceFilter(tab.value)}
+            className={`flex-1 py-1 text-xs font-mono transition-colors ${sourceFilter === tab.value
               ? 'text-neon-green bg-cyber-border'
               : 'text-cyber-text-dim hover:text-cyber-text'
               }`}
+            title={tab.label}
             style={{ fontSize: '9px' }}
           >
-            {f === 'ALL' ? 'ALL' : f === 'success' ? 'SUC' : f.toUpperCase().slice(0, 3)}
+            {tab.short}
           </button>
         ))}
       </div>
@@ -100,9 +108,9 @@ export default function SessionList(): JSX.Element {
       <div className="flex-1 overflow-y-auto">
         {filteredProjects.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-cyber-text-dim text-xs">
-            <span>NO SESSIONS</span>
+            <span>NO PROJECTS</span>
             <span className="text-cyber-border-bright mt-1" style={{ fontSize: '9px' }}>
-              {searchQuery ? 'No match found' : 'Check ~/.claude/projects/'}
+              {searchQuery ? 'No project matched' : 'Check ~/.claude/projects/'}
             </span>
           </div>
         ) : (
@@ -112,10 +120,11 @@ export default function SessionList(): JSX.Element {
 
             const pKey = projectSelectionKey(project.source, project.path)
             const isExpanded = expandedProjects.has(pKey)
-            const isProjectActive =
+            const isProjectActive = Boolean(
               selectedProjectKey === pKey ||
               (selectedSession &&
                 projectSelectionKey(selectedSession.source, selectedSession.projectPath) === pKey)
+            )
 
             return (
               <div key={pKey} className="border-b border-cyber-border border-opacity-50">

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Session, ProjectStats, HeatmapMode, HeatmapTimeRange } from '../types'
+import type { Session, ProjectStats, HeatmapMode, HeatmapTimeRange, DataSource } from '../types'
 
 function projectSelectionKey(source: Session['source'] | ProjectStats['source'], projectPath: string): string {
   return `${source}:${projectPath}`
@@ -17,6 +17,7 @@ interface AppState {
   heatmapTimeRange: HeatmapTimeRange
   heatmapProject: string
   searchQuery: string
+  sourceFilter: 'ALL' | DataSource
 
   loadSessions: () => Promise<void>
   selectSession: (session: Session | null) => Promise<void>
@@ -25,6 +26,7 @@ interface AppState {
   setHeatmapTimeRange: (range: HeatmapTimeRange) => void
   setHeatmapProject: (project: string) => void
   setSearchQuery: (q: string) => void
+  setSourceFilter: (source: 'ALL' | DataSource) => void
 
   // Derived metrics
   totalSessions: () => number
@@ -46,6 +48,7 @@ export const useStore = create<AppState>((set, get) => ({
   heatmapTimeRange: 'MONTH',
   heatmapProject: 'ALL PROJECTS',
   searchQuery: '',
+  sourceFilter: 'ALL',
 
   loadSessions: async () => {
     set({ loading: true, error: null })
@@ -94,6 +97,7 @@ export const useStore = create<AppState>((set, get) => ({
   setHeatmapTimeRange: (range) => set({ heatmapTimeRange: range }),
   setHeatmapProject: (project) => set({ heatmapProject: project }),
   setSearchQuery: (q) => set({ searchQuery: q }),
+  setSourceFilter: (source) => set({ sourceFilter: source }),
 
   totalSessions: () => get().sessions.length,
   totalPrompts: () => get().sessions.reduce((sum, s) => sum + s.promptCount, 0),
