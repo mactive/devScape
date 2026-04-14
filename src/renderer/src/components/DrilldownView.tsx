@@ -26,6 +26,8 @@ export default function DrilldownView(): JSX.Element {
   if (!selectedSession) return <></>
 
   const messages = selectedSession.messages || []
+  const isTraeSource = selectedSession.source === 'trae' || selectedSession.source === 'trae-cn'
+  const hasAssistantMessage = messages.some((m) => m.role === 'assistant')
   const sourceConfig = {
     claude: { label: 'CLAUDE CODE', color: '#5EAB07' },
     trae: { label: 'TRAE', color: '#4cada5' },
@@ -72,6 +74,11 @@ export default function DrilldownView(): JSX.Element {
         <p className="text-xs font-mono text-cyber-text leading-relaxed" style={{ color: '#88bb88' }}>
           {selectedSession.firstPrompt}
         </p>
+        {isTraeSource && !loadingDetail && messages.length > 0 && !hasAssistantMessage && (
+          <p className="text-[10px] font-mono mt-1" style={{ color: '#b6a25a' }}>
+            TRAE DATA NOTE: CURRENTLY ONLY LOCAL INPUT HISTORY IS AVAILABLE. ASSISTANT REPLIES MAY NOT BE PRESENT.
+          </p>
+        )}
       </div>
 
       {/* Messages */}
