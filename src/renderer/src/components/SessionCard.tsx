@@ -52,12 +52,13 @@ export default function SessionCard({ session, isSelected, isProjectSelected }: 
 
   return (
     <div
-      className={`px-3 py-2 border-b border-cyber-border cursor-pointer transition-all group ${isProjectSelected
-        ? 'bg-cyber-border border-l-2 border-l-neon-green'
-        : 'hover:bg-cyber-gray border-l-2 border-l-transparent'
+      className={`px-3 py-2 border-b border-cyber-border cursor-pointer transition-all duration-150 group ${isProjectSelected
+        ? 'bg-cyber-border border-l-2 border-l-neon-green hover:bg-cyber-border-bright hover:bg-opacity-30 hover:translate-x-[1px]'
+        : 'border-l-2 border-l-transparent hover:bg-cyber-gray hover:border-l-cyber-border-bright hover:translate-x-[1px]'
         }`}
       onClick={() => {
         selectProject(projectSelectionKey(session.source, session.projectPath))
+        selectSession(session)
       }}
     >
       {/* Header row */}
