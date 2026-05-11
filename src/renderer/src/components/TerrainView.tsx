@@ -11,7 +11,7 @@
  * Big projects → steep narrow ridges; small projects → flat oval contours.
  */
 
-import { useRef, useMemo, useEffect } from 'react'
+import { useRef, useMemo, useEffect, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Billboard, Text, Line } from '@react-three/drei'
 import * as THREE from 'three'
@@ -212,6 +212,9 @@ function buildMountains(
 
 
 type V3 = [number, number, number]
+type RenderMode = 'contour' | 'simulated'
+
+const SIM_MAX_TREE_INSTANCES = 900
 
 // ── Deterministic hash ────────────────────────────────────────────────────────
 
@@ -336,6 +339,388 @@ function findRadius(
     }
   }
   return 0
+}
+
+function sampleMountainHeight(
+  lx: number,
+  lz: number,
+  m: Mountain,
+  bumps: Bump[],
+  seed: number
+): number {
+  const peak = Math.max(evalHW(0, 0, bumps, m.sigma, seed), 0.001)
+  const raw = Math.max(0, evalHW(lx, lz, bumps, m.sigma, seed))
+  const natural = (raw / peak) * m.peakHeight
+  const radiusNorm = Math.min(1, Math.sqrt(lx * lx + lz * lz) / (m.sigma * R_CAP_K * 1.4))
+  const eroded = natural * (1 - Math.pow(radiusNorm, 2.6) * 0.28)
+  const terraceStep = Math.max(0.34, m.peakHeight / (7 + Math.min(6, Math.floor(m.sessionCount / 2))))
+  const terraceMix = THREE.MathUtils.clamp(0.18 + m.sessionCount * 0.018, 0.18, 0.46)
+  const terraced = Math.floor(eroded / terraceStep) * terraceStep +
+    Math.pow((eroded % terraceStep) / terraceStep, 0.58) * terraceStep
+  return Math.max(0, THREE.MathUtils.lerp(eroded, terraced, terraceMix))
+}
+
+function terrainColorAt(height: number, radial: number, slope: number, m: Mountain): THREE.Color {
+  const h = THREE.MathUtils.clamp(height / Math.max(m.peakHeight, 0.001), 0, 1)
+  const sourceTint = new THREE.Color(SOURCE_COLORS[m.source] || SOURCE_COLORS.claude)
+  const valleyMoss = new THREE.Color('#3d6a42')
+  const grass = new THREE.Color('#6f913f')
+  const upland = new THREE.Color('#93aa55')
+  const sunlitRidge = new THREE.Color('#d6d37a')
+  const forestShadow = new THREE.Color('#17382f')
+  const coolShadow = new THREE.Color('#0f2a2e')
+  const stone = new THREE.Color('#777552')
+
+  let color = valleyMoss.clone().lerp(grass, Math.min(1, h * 1.45))
+  if (h > 0.28) color.lerp(upland, (h - 0.28) / 0.54)
+  if (h > 0.58) color.lerp(sunlitRidge, (h - 0.58) / 0.42)
+  if (radial > 0.72 && h < 0.36) color.lerp(coolShadow, (radial - 0.72) / 0.28)
+  if (slope > 0.2) color.lerp(stone, THREE.MathUtils.clamp((slope - 0.2) * 1.75 + m.bashRatio * 0.32, 0, 0.42))
+  if (h > 0.1 && h < 0.58 && slope < 0.24) color.lerp(forestShadow, THREE.MathUtils.clamp(0.12 + m.toolDensity * 0.08, 0.12, 0.34))
+  color.lerp(sourceTint, 0.025)
+  return color
+}
+
+interface MountainSampler {
+  m: Mountain
+  seed: number
+  bumps: Bump[]
+  radius: number
+  influenceRadius: number
+}
+
+interface RangeLink {
+  a: MountainSampler
+  b: MountainSampler
+  width: number
+  strength: number
+}
+
+interface RangeSample {
+  height: number
+  dominant: MountainSampler | null
+}
+
+interface TreeInstance {
+  position: V3
+  scale: number
+  color: string
+}
+
+interface PondInstance {
+  position: V3
+  scale: [number, number, number]
+  rotationY: number
+}
+
+interface RangeModel {
+  geometry: THREE.BufferGeometry
+  contourSegments: V3[]
+  pathLines: V3[][]
+  trees: TreeInstance[]
+  ponds: PondInstance[]
+}
+
+function makeMountainSamplers(mounts: Mountain[]): MountainSampler[] {
+  return mounts.map((m) => ({
+    m,
+    seed: nameHash(m.name),
+    bumps: makeBumps(m.name, m.peakHeight, m.sigma),
+    radius: m.sigma * R_CAP_K * 1.45,
+    influenceRadius: m.sigma * R_CAP_K * 3.35
+  }))
+}
+
+function buildRangeLinks(samplers: MountainSampler[]): RangeLink[] {
+  const links: RangeLink[] = []
+  const seen = new Set<string>()
+  for (let i = 0; i < samplers.length; i++) {
+    const a = samplers[i]
+    const neighbors = samplers
+      .map((b, j) => ({
+        b,
+        j,
+        dist: Math.hypot(b.m.worldX - a.m.worldX, b.m.worldZ - a.m.worldZ)
+      }))
+      .filter((item) => item.j !== i)
+      .sort((u, v) => u.dist - v.dist)
+      .slice(0, 2)
+
+    for (const { b, j, dist } of neighbors) {
+      if (dist > 22) continue
+      const key = [Math.min(i, j), Math.max(i, j)].join(':')
+      if (seen.has(key)) continue
+      seen.add(key)
+      links.push({
+        a,
+        b,
+        width: Math.max(1.25, Math.min(a.m.sigma, b.m.sigma) * 1.18 + dist * 0.05),
+        strength: 0.18 + fhash(a.seed + b.seed) * 0.12
+      })
+    }
+  }
+  return links
+}
+
+function sampleSamplerHeight(x: number, z: number, sampler: MountainSampler): number {
+  const lx = x - sampler.m.worldX
+  const lz = z - sampler.m.worldZ
+  const dist = Math.hypot(lx, lz)
+  const fade = 1 - THREE.MathUtils.smoothstep(dist, sampler.influenceRadius * 0.68, sampler.influenceRadius)
+  if (fade <= 0) return 0
+  return sampleMountainHeight(lx * 0.78, lz * 0.78, sampler.m, sampler.bumps, sampler.seed) * fade
+}
+
+function sampleLinkHeight(x: number, z: number, link: RangeLink): number {
+  const ax = link.a.m.worldX, az = link.a.m.worldZ
+  const bx = link.b.m.worldX, bz = link.b.m.worldZ
+  const dx = bx - ax, dz = bz - az
+  const lenSq = dx * dx + dz * dz || 1
+  const t = THREE.MathUtils.clamp(((x - ax) * dx + (z - az) * dz) / lenSq, 0, 1)
+  const px = ax + dx * t, pz = az + dz * t
+  const sideDist = Math.hypot(x - px, z - pz)
+  const along = Math.pow(Math.sin(t * Math.PI), 0.55)
+  const saddle = Math.min(link.a.m.peakHeight, link.b.m.peakHeight) * link.strength +
+    Math.max(link.a.m.peakHeight, link.b.m.peakHeight) * 0.055
+  return saddle * along * Math.exp(-(sideDist * sideDist) / (2 * link.width * link.width))
+}
+
+function sampleLowlandHeight(x: number, z: number): number {
+  return 0.10 +
+    Math.sin(x * 0.19 + z * 0.11) * 0.045 +
+    Math.sin(x * 0.43 - z * 0.28) * 0.028 +
+    Math.sin(x * 0.08 + z * 0.39) * 0.022
+}
+
+function sampleRangeHeight(
+  x: number,
+  z: number,
+  samplers: MountainSampler[],
+  links: RangeLink[]
+): RangeSample {
+  let top = 0
+  let second = 0
+  let dominant: MountainSampler | null = null
+
+  for (const sampler of samplers) {
+    const h = sampleSamplerHeight(x, z, sampler)
+    if (h > top) {
+      second = top
+      top = h
+      dominant = sampler
+    } else if (h > second) {
+      second = h
+    }
+  }
+
+  let bridge = 0
+  for (const link of links) bridge = Math.max(bridge, sampleLinkHeight(x, z, link))
+
+  const relief = Math.max(top + second * 0.2, bridge) * 0.72
+  let height = relief + sampleLowlandHeight(x, z)
+
+  const terraceStep = 0.34
+  const frac = (height % terraceStep) / terraceStep
+  const terraced = Math.floor(height / terraceStep) * terraceStep + Math.pow(frac, 0.5) * terraceStep
+  height = THREE.MathUtils.lerp(height, terraced, relief > 0.32 ? 0.26 : 0.1)
+
+  return { height: Math.max(0, height), dominant: relief > 0.18 ? dominant : null }
+}
+
+function rangeTerrainColorAt(height: number, maxHeight: number, slope: number, dominant: MountainSampler | null): THREE.Color {
+  if (dominant) return terrainColorAt(height, 0.48, slope, dominant.m)
+
+  const h = THREE.MathUtils.clamp(height / Math.max(maxHeight, 0.001), 0, 1)
+  const low = new THREE.Color('#365d42')
+  const grass = new THREE.Color('#668a43')
+  const warm = new THREE.Color('#9baa55')
+  const color = low.lerp(grass, 0.38 + h * 0.82).lerp(warm, Math.max(0, h - 0.28) * 0.55)
+  if (slope > 0.18) color.lerp(new THREE.Color('#25483d'), Math.min(0.22, slope * 0.08))
+  return color
+}
+
+function buildRangeContourSegments(
+  heights: number[],
+  xs: number[],
+  zs: number[],
+  nx: number,
+  nz: number,
+  maxHeight: number
+): V3[] {
+  const segments: V3[] = []
+  const levels: number[] = []
+  for (let h = 0.34; h < maxHeight * 0.92; h += 0.34) levels.push(h)
+
+  const interp = (x1: number, z1: number, h1: number, x2: number, z2: number, h2: number, level: number): V3 => {
+    const t = THREE.MathUtils.clamp((level - h1) / (h2 - h1 || 1), 0, 1)
+    return [THREE.MathUtils.lerp(x1, x2, t), level + 0.035, THREE.MathUtils.lerp(z1, z2, t)]
+  }
+
+  for (const level of levels) {
+    for (let iz = 0; iz < nz; iz++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const a = iz * (nx + 1) + ix
+        const b = a + 1
+        const c = a + (nx + 1)
+        const d = c + 1
+        const pts: V3[] = []
+        const x0 = xs[ix], x1 = xs[ix + 1]
+        const z0 = zs[iz], z1 = zs[iz + 1]
+        const ha = heights[a], hb = heights[b], hc = heights[c], hd = heights[d]
+
+        if ((ha < level) !== (hb < level)) pts.push(interp(x0, z0, ha, x1, z0, hb, level))
+        if ((hb < level) !== (hd < level)) pts.push(interp(x1, z0, hb, x1, z1, hd, level))
+        if ((hd < level) !== (hc < level)) pts.push(interp(x1, z1, hd, x0, z1, hc, level))
+        if ((hc < level) !== (ha < level)) pts.push(interp(x0, z1, hc, x0, z0, ha, level))
+
+        if (pts.length === 2) segments.push(pts[0], pts[1])
+        else if (pts.length === 4) segments.push(pts[0], pts[1], pts[2], pts[3])
+      }
+    }
+  }
+  return segments
+}
+
+function buildRangePathLines(samplers: MountainSampler[], links: RangeLink[]): V3[][] {
+  return links.slice(0, 18).map((link, i) => {
+    const pts: V3[] = []
+    const seed = link.a.seed + link.b.seed + i * 97
+    const ax = link.a.m.worldX, az = link.a.m.worldZ
+    const bx = link.b.m.worldX, bz = link.b.m.worldZ
+    const dx = bx - ax, dz = bz - az
+    const len = Math.hypot(dx, dz) || 1
+    const nx = -dz / len, nz = dx / len
+
+    for (let s = 0; s <= 40; s++) {
+      const t = s / 40
+      const wave = Math.sin(t * Math.PI * 2.2 + fhash(seed) * Math.PI) * len * 0.035
+      const x = THREE.MathUtils.lerp(ax, bx, t) + nx * wave
+      const z = THREE.MathUtils.lerp(az, bz, t) + nz * wave
+      const h = sampleRangeHeight(x, z, samplers, links).height
+      pts.push([x, h + 0.05, z])
+    }
+    return pts
+  })
+}
+
+function buildRangeTrees(samplers: MountainSampler[], links: RangeLink[], maxHeight: number): TreeInstance[] {
+  const trees: TreeInstance[] = []
+  const seed = samplers.reduce((acc, sampler) => acc + sampler.seed, 17)
+  const tries = 2200
+  const xMin = GRID_X_MIN - 3.2, xMax = GRID_X_MAX + 3.2
+  const zMin = GRID_Z_MIN - 3.0, zMax = GRID_Z_MAX + 3.0
+
+  for (let i = 0; i < tries && trees.length < SIM_MAX_TREE_INSTANCES; i++) {
+    const x = THREE.MathUtils.lerp(xMin, xMax, fhash(seed + i * 11))
+    const z = THREE.MathUtils.lerp(zMin, zMax, fhash(seed + i * 13))
+    const sample = sampleRangeHeight(x, z, samplers, links)
+    const hn = sample.height / Math.max(maxHeight, 0.001)
+    if (sample.height < 0.16 || hn > 0.42) continue
+    if (fhash(seed + i * 17) < hn * 0.7) continue
+
+    const scale = 0.055 + fhash(seed + i * 19) * 0.125
+    const color = fhash(seed + i * 23) > 0.78
+      ? '#7f9650'
+      : fhash(seed + i * 29) > 0.48 ? '#315f45' : '#173f34'
+    trees.push({
+      position: [x, sample.height + scale * 0.35, z],
+      scale,
+      color
+    })
+  }
+  return trees
+}
+
+function buildRangePonds(samplers: MountainSampler[], links: RangeLink[], maxHeight: number): PondInstance[] {
+  const ponds: PondInstance[] = []
+  const seed = samplers.reduce((acc, sampler) => acc ^ sampler.seed, 911)
+  const xMin = GRID_X_MIN - 3.4, xMax = GRID_X_MAX + 3.4
+  const zMin = GRID_Z_MIN - 3.2, zMax = GRID_Z_MAX + 3.2
+
+  for (let i = 0; i < 1100 && ponds.length < 30; i++) {
+    const x = THREE.MathUtils.lerp(xMin, xMax, fhash(seed + i * 31))
+    const z = THREE.MathUtils.lerp(zMin, zMax, fhash(seed + i * 37))
+    const sample = sampleRangeHeight(x, z, samplers, links)
+    const hn = sample.height / Math.max(maxHeight, 0.001)
+    if (sample.height < 0.04 || hn > 0.34) continue
+
+    const h1 = sampleRangeHeight(x + 0.22, z, samplers, links).height
+    const h2 = sampleRangeHeight(x, z + 0.22, samplers, links).height
+    if (Math.abs(h1 - sample.height) + Math.abs(h2 - sample.height) > 0.24) continue
+
+    const sx = 0.34 + fhash(seed + i * 41) * 0.95
+    const sz = 0.2 + fhash(seed + i * 43) * 0.55
+    ponds.push({
+      position: [x, sample.height + 0.028, z],
+      scale: [sx, sz, 1],
+      rotationY: fhash(seed + i * 47) * Math.PI
+    })
+  }
+  return ponds
+}
+
+function buildRangeModel(mounts: Mountain[]): RangeModel {
+  const samplers = makeMountainSamplers(mounts)
+  const links = buildRangeLinks(samplers)
+  const nx = 152
+  const nz = 88
+  const xMin = GRID_X_MIN - 3.4, xMax = GRID_X_MAX + 3.4
+  const zMin = GRID_Z_MIN - 3.2, zMax = GRID_Z_MAX + 3.2
+  const xs = Array.from({ length: nx + 1 }, (_, i) => THREE.MathUtils.lerp(xMin, xMax, i / nx))
+  const zs = Array.from({ length: nz + 1 }, (_, i) => THREE.MathUtils.lerp(zMin, zMax, i / nz))
+  const positions: number[] = []
+  const colors: number[] = []
+  const indices: number[] = []
+  const heights: number[] = []
+  const dominants: (MountainSampler | null)[] = []
+
+  for (let iz = 0; iz <= nz; iz++) {
+    for (let ix = 0; ix <= nx; ix++) {
+      const sample = sampleRangeHeight(xs[ix], zs[iz], samplers, links)
+      heights.push(sample.height)
+      dominants.push(sample.dominant)
+      positions.push(xs[ix], sample.height, zs[iz])
+    }
+  }
+
+  const maxHeight = Math.max(...heights, 1)
+
+  for (let iz = 0; iz < nz; iz++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const a = iz * (nx + 1) + ix
+      const b = a + 1
+      const c = a + (nx + 1)
+      const d = c + 1
+      indices.push(a, c, b, b, c, d)
+    }
+  }
+
+  for (let iz = 0; iz <= nz; iz++) {
+    for (let ix = 0; ix <= nx; ix++) {
+      const idx = iz * (nx + 1) + ix
+      const left = heights[iz * (nx + 1) + Math.max(0, ix - 1)]
+      const right = heights[iz * (nx + 1) + Math.min(nx, ix + 1)]
+      const front = heights[Math.max(0, iz - 1) * (nx + 1) + ix]
+      const back = heights[Math.min(nz, iz + 1) * (nx + 1) + ix]
+      const slope = Math.abs(right - left) / ((xMax - xMin) / nx) + Math.abs(back - front) / ((zMax - zMin) / nz)
+      const color = rangeTerrainColorAt(heights[idx], maxHeight, slope, dominants[idx])
+      colors.push(color.r, color.g, color.b)
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setIndex(indices)
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+  geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3))
+  geometry.computeVertexNormals()
+
+  return {
+    geometry,
+    contourSegments: buildRangeContourSegments(heights, xs, zs, nx, nz, maxHeight),
+    pathLines: buildRangePathLines(samplers, links),
+    trees: buildRangeTrees(samplers, links, maxHeight),
+    ponds: buildRangePonds(samplers, links, maxHeight)
+  }
 }
 
 // ── Contour ring builder ──────────────────────────────────────────────────────
@@ -521,7 +906,15 @@ function HourLabels({ dr }: { dr: DateRange }) {
 
 /** Contour lines — each ring is its own closed Line for guaranteed continuity.
  *  All materials share the same dashOffset, driven by a single useFrame. */
-function ContourLines({ mounts, activeMountainKey }: { mounts: Mountain[]; activeMountainKey: string | null }) {
+function ContourLines({
+  mounts,
+  activeMountainKey,
+  mode = 'contour'
+}: {
+  mounts: Mountain[]
+  activeMountainKey: string | null
+  mode?: RenderMode
+}) {
   const groupRef = useRef<THREE.Group>(null)
   const lineRefs = useRef<any[]>([])
   const rings = useMemo(() => {
@@ -562,11 +955,13 @@ function ContourLines({ mounts, activeMountainKey }: { mounts: Mountain[]; activ
           key={i}
           ref={(el: any) => { lineRefs.current[i] = el }}
           points={ring.pts}
-          color={ring.color}
-          lineWidth={1.0}
-          dashed
-          dashSize={0.2}
-          gapSize={0.2}
+          color={mode === 'simulated' ? '#d7ead4' : ring.color}
+          lineWidth={mode === 'simulated' ? 0.65 : 1.0}
+          dashed={mode === 'contour'}
+          dashSize={mode === 'contour' ? 0.2 : 1}
+          gapSize={mode === 'contour' ? 0.2 : 0}
+          transparent
+          opacity={mode === 'simulated' ? 0.42 : 1}
         />
       ))}
     </group>
@@ -665,6 +1060,145 @@ function EffectLayer({ mounts, activeMountainKey }: { mounts: Mountain[]; active
   )
 }
 
+function SimulatedRangeSurface({ model }: { model: RangeModel }) {
+  return (
+    <mesh geometry={model.geometry} castShadow receiveShadow>
+      <meshStandardMaterial
+        vertexColors
+        roughness={0.94}
+        metalness={0.02}
+        flatShading={false}
+      />
+    </mesh>
+  )
+}
+
+function ProceduralForest({ trees }: { trees: TreeInstance[] }) {
+  const canopyRef = useRef<THREE.InstancedMesh>(null)
+  const trunkRef = useRef<THREE.InstancedMesh>(null)
+
+  useEffect(() => {
+    const canopy = canopyRef.current
+    const trunk = trunkRef.current
+    if (!canopy || !trunk) return
+
+    const matrix = new THREE.Matrix4()
+    const position = new THREE.Vector3()
+    const quaternion = new THREE.Quaternion()
+    const scale = new THREE.Vector3()
+    const color = new THREE.Color()
+
+    trees.forEach((tree, i) => {
+      position.set(tree.position[0], tree.position[1], tree.position[2])
+      scale.set(tree.scale * 1.25, tree.scale * 0.9, tree.scale * 1.25)
+      matrix.compose(position, quaternion, scale)
+      canopy.setMatrixAt(i, matrix)
+      canopy.setColorAt(i, color.set(tree.color))
+
+      position.set(tree.position[0], tree.position[1] - tree.scale * 0.55, tree.position[2])
+      scale.set(tree.scale * 0.16, tree.scale * 0.85, tree.scale * 0.16)
+      matrix.compose(position, quaternion, scale)
+      trunk.setMatrixAt(i, matrix)
+    })
+
+    canopy.instanceMatrix.needsUpdate = true
+    trunk.instanceMatrix.needsUpdate = true
+    if (canopy.instanceColor) canopy.instanceColor.needsUpdate = true
+  }, [trees])
+
+  if (!trees.length) return null
+  return (
+    <>
+      <instancedMesh ref={trunkRef} args={[undefined, undefined, trees.length]} castShadow receiveShadow>
+        <cylinderGeometry args={[1, 1, 1, 5]} />
+        <meshStandardMaterial color="#5b4528" roughness={0.95} />
+      </instancedMesh>
+      <instancedMesh ref={canopyRef} args={[undefined, undefined, trees.length]} castShadow receiveShadow>
+        <dodecahedronGeometry args={[1, 0]} />
+        <meshStandardMaterial color="#ffffff" roughness={0.88} />
+      </instancedMesh>
+    </>
+  )
+}
+
+function SimulatedRangeContours({ points }: { points: V3[] }) {
+  if (!points.length) return null
+  return (
+    <Line
+      points={points}
+      color="#d7ead4"
+      lineWidth={0.56}
+      segments
+      transparent
+      opacity={0.34}
+    />
+  )
+}
+
+function SimulatedPonds({ ponds }: { ponds: PondInstance[] }) {
+  return (
+    <>
+      {ponds.map((pond, i) => (
+        <mesh
+          key={i}
+          position={pond.position}
+          rotation={[-Math.PI / 2, 0, pond.rotationY]}
+          scale={pond.scale}
+          receiveShadow
+        >
+          <circleGeometry args={[1, 32]} />
+          <meshStandardMaterial
+            color="#68b9b2"
+            emissive="#0d3f47"
+            emissiveIntensity={0.24}
+            roughness={0.22}
+            metalness={0.04}
+            transparent
+            opacity={0.82}
+          />
+        </mesh>
+      ))}
+    </>
+  )
+}
+
+function SimulatedFeatureLines({ lines }: { lines: V3[][] }) {
+  return (
+    <>
+      {lines.map((pts, i) => (
+        <Line key={i} points={pts} color="#c9bf73" lineWidth={1.05} transparent opacity={0.58} />
+      ))}
+    </>
+  )
+}
+
+function SimulatedTerrain({ mounts }: { mounts: Mountain[] }) {
+  const model = useMemo(() => buildRangeModel(mounts), [mounts])
+
+  return (
+    <>
+      <ambientLight intensity={0.58} />
+      <hemisphereLight args={['#d1dea1', '#071a22', 1.35]} />
+      <directionalLight
+        position={[-18, 24, 16]}
+        intensity={2.15}
+        castShadow
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+      />
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.035, 0]} receiveShadow>
+        <planeGeometry args={[WW * X_USE * 1.18, WD * Z_USE * 1.22, 1, 1]} />
+        <meshStandardMaterial color="#365d42" roughness={0.96} metalness={0.02} />
+      </mesh>
+      <SimulatedRangeSurface model={model} />
+      <SimulatedRangeContours points={model.contourSegments} />
+      <SimulatedPonds ponds={model.ponds} />
+      <ProceduralForest trees={model.trees} />
+      <SimulatedFeatureLines lines={model.pathLines} />
+    </>
+  )
+}
+
 function CameraRig({ activeMountain }: { activeMountain?: Mountain }) {
   const { camera, controls } = useThree()
   const isAnimating = useRef(false)
@@ -683,11 +1217,10 @@ function CameraRig({ activeMountain }: { activeMountain?: Mountain }) {
   }, [activeMountain])
 
   useEffect(() => {
-    if (controls) {
-      const onStart = () => { isAnimating.current = false }
-      controls.addEventListener('start', onStart)
-      return () => { controls.removeEventListener('start', onStart) }
-    }
+    if (!controls) return undefined
+    const onStart = () => { isAnimating.current = false }
+    controls.addEventListener('start', onStart)
+    return () => { controls.removeEventListener('start', onStart) }
   }, [controls])
 
   useFrame(() => {
@@ -768,6 +1301,14 @@ function PeakLabels({ mounts }: { mounts: Mountain[] }) {
 
 export default function TerrainView(): JSX.Element {
   const { sessions, projects, selectedProjectKey, selectedSession, sourceFilter } = useStore()
+  const [renderMode, setRenderMode] = useState<RenderMode>(() => {
+    const saved = window.localStorage.getItem('devscape-render-mode')
+    return saved === 'simulated' ? 'simulated' : 'contour'
+  })
+
+  useEffect(() => {
+    window.localStorage.setItem('devscape-render-mode', renderMode)
+  }, [renderMode])
 
   const visibleSessions = useMemo(
     () => sourceFilter === 'ALL' ? sessions : sessions.filter((s) => s.source === sourceFilter),
@@ -799,13 +1340,30 @@ export default function TerrainView(): JSX.Element {
       <div className="absolute top-2 left-2 z-10 cyber-header text-cyber-text-dim py-1">
         ACTIVITY TERRAIN
       </div>
+      <div
+        className="absolute top-12 left-2 z-10 flex border border-cyber-border bg-cyber-dark/90"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        <button
+          onClick={() => setRenderMode('contour')}
+          className={`px-3 py-1 text-xs font-mono transition-colors ${renderMode === 'contour' ? 'bg-cyber-border text-neon-green' : 'text-cyber-text-dim hover:text-neon-green'}`}
+        >
+          CONTOUR
+        </button>
+        <button
+          onClick={() => setRenderMode('simulated')}
+          className={`px-3 py-1 text-xs font-mono border-l border-cyber-border transition-colors ${renderMode === 'simulated' ? 'bg-cyber-border text-neon-green' : 'text-cyber-text-dim hover:text-neon-green'}`}
+        >
+          SIM
+        </button>
+      </div>
       {activeProjectKey && (
         <button
           onClick={() => {
             useStore.getState().selectProject(null)
             useStore.getState().selectSession(null)
           }}
-          className="absolute top-12 left-2 z-10 px-3 py-1 bg-cyber-dark border border-cyber-green text-cyber-green text-xs font-mono rounded hover:bg-cyber-green/20 transition-colors cursor-pointer"
+          className="absolute top-24 left-2 z-10 px-3 py-1 bg-cyber-dark border border-cyber-green text-cyber-green text-xs font-mono rounded hover:bg-cyber-green/20 transition-colors cursor-pointer"
         >
           ← GLOBAL VIEW
         </button>
@@ -825,21 +1383,31 @@ export default function TerrainView(): JSX.Element {
         <span><span style={{ color: '#ff6414' }}>○</span>=bash ratio</span>
       </div>
 
-      <Canvas camera={{ position: [2, 22, 30], fov: 44 }} style={{ background: '#020702' }} gl={{ antialias: true }}>
+      <Canvas
+        shadows={renderMode === 'simulated'}
+        camera={{ position: [2, 22, 30], fov: 44 }}
+        style={{ background: renderMode === 'simulated' ? '#061923' : '#020702' }}
+        gl={{ antialias: true }}
+      >
         <CameraRig activeMountain={activeMountain} />
-        <DateTimeGrid />
-        <GridDots />
+        {renderMode === 'simulated' ? (
+          <SimulatedTerrain mounts={mounts} />
+        ) : null}
+        {renderMode === 'contour' && <DateTimeGrid />}
+        {renderMode === 'contour' && <GridDots />}
         <CoordinateAxes dr={dr} />
         <DateLabels dr={dr} />
         <HourLabels dr={dr} />
-        <ContourLines mounts={mounts} activeMountainKey={activeProjectKey} />
+        {renderMode === 'contour' && (
+          <ContourLines mounts={mounts} activeMountainKey={activeProjectKey} mode={renderMode} />
+        )}
         <EffectLayer mounts={mounts} activeMountainKey={activeProjectKey} />
         <PeakLabels mounts={mounts} />
 
         <OrbitControls enablePan enableZoom enableRotate makeDefault
           maxPolarAngle={Math.PI / 2 - 0.03} minDistance={6} maxDistance={100}
           target={[0, 1, 0]} />
-        <fog attach="fog" args={['#020702', 55, 120]} />
+        <fog attach="fog" args={[renderMode === 'simulated' ? '#061923' : '#020702', 48, 118]} />
       </Canvas>
 
       {visibleSessions.length === 0 && (
