@@ -1,4 +1,4 @@
-export type DataSource = 'claude' | 'trae' | 'trae-cn'
+export type DataSource = 'claude' | 'trae' | 'trae-cn' | 'codex'
 
 export interface ParsedMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'

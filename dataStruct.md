@@ -9,7 +9,7 @@
 ### 1.1 DataSource
 
 ```ts
-type DataSource = 'claude' | 'trae' | 'trae-cn'
+type DataSource = 'claude' | 'trae' | 'trae-cn' | 'codex'
 ```
 
 表示会话来源工具。
@@ -52,6 +52,7 @@ type DataSource = 'claude' | 'trae' | 'trae-cn'
 ### 2.1 数据来源
 
 - Claude：`~/.claude/projects/*/*.jsonl`
+- Codex：`~/.codex/sessions/**/*.jsonl`、`~/.codex/archived_sessions/*.jsonl`
 - Trae / Trae CN：`~/Library/Application Support/{Trae,Trae CN}/User/workspaceStorage/*/state.vscdb`
 
 ### 2.2 聚合规则
@@ -106,7 +107,7 @@ type DataSource = 'claude' | 'trae' | 'trae-cn'
 - 顶部显示 `PROJECTS`
 - 每个 project 可点箭头展开其 `sessions`
 - 搜索框：`search projects...`，仅按 `project.name / project.path` 过滤
-- Tab：`ALL / CLD / TRAE / TCN`，映射到 `sourceFilter`
+- Tab：`ALL / CLD / CDX / TRAE / TCN`，映射到 `sourceFilter`
 
 ### 4.2 右侧列表（`ProjectsList.tsx`）
 

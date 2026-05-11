@@ -3,7 +3,7 @@ import { basename, join } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 
-export type DataSource = 'claude' | 'trae' | 'trae-cn'
+export type DataSource = 'claude' | 'trae' | 'trae-cn' | 'codex'
 
 export interface RawMessage {
   uuid?: string
@@ -31,10 +31,54 @@ export interface RawMessage {
 export interface ContentBlock {
   type: string
   text?: string
-  id?: string
   name?: string
+  id?: string
   input?: Record<string, unknown>
   content?: string | ContentBlock[]
+}
+
+interface CodexLogEvent {
+  timestamp?: string
+  type: string
+  payload?: {
+    type?: string
+    role?: string
+    content?: ContentBlock[]
+    phase?: string
+    name?: string
+    arguments?: string
+    input?: string
+    message?: string
+    id?: string
+    timestamp?: string
+    cwd?: string
+    total_token_usage?: {
+      input_tokens?: number
+      output_tokens?: number
+      cached_input_tokens?: number
+      total_tokens?: number
+    }
+    last_token_usage?: {
+      input_tokens?: number
+      output_tokens?: number
+      cached_input_tokens?: number
+      total_tokens?: number
+    }
+    info?: {
+      total_token_usage?: {
+        input_tokens?: number
+        output_tokens?: number
+        cached_input_tokens?: number
+        total_tokens?: number
+      }
+      last_token_usage?: {
+        input_tokens?: number
+        output_tokens?: number
+        cached_input_tokens?: number
+        total_tokens?: number
+      }
+    }
+  }
 }
 
 export interface ParsedMessage {
@@ -115,6 +159,277 @@ function sqliteQueryAsJson(dbPath: string, sql: string): Array<Record<string, un
 
 function projectKey(source: DataSource, path: string): string {
   return `${source}:${path}`
+}
+
+function collectJsonlFiles(dir: string, limit = 4000): string[] {
+  if (!existsSync(dir)) return []
+  const result: string[] = []
+  const stack = [dir]
+  while (stack.length && result.length < limit) {
+    const current = stack.pop()!
+    let entries: string[] = []
+    try {
+      entries = readdirSync(current)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const fullPath = join(current, entry)
+      try {
+        const stat = statSync(fullPath)
+        if (stat.isDirectory()) stack.push(fullPath)
+        else if (entry.endsWith('.jsonl')) result.push(fullPath)
+      } catch {
+        // Ignore entries that disappear or cannot be read.
+      }
+    }
+  }
+  return result
+}
+
+function extractCodexContent(content: ContentBlock[] | undefined): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => {
+      if (typeof block.text === 'string') return block.text
+      if (typeof block.content === 'string') return block.content
+      if (Array.isArray(block.content)) return extractCodexContent(block.content)
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+}
+
+function isCodexUserPrompt(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  return !trimmed.startsWith('<environment_context>')
+}
+
+function codexSessionIdFromFile(filePath: string): string {
+  const file = basename(filePath).replace('.jsonl', '')
+  const match = file.match(/(019[a-z0-9-]+)$/i)
+  return match?.[1] || file
+}
+
+function findCodexSessionFile(sessionId: string): string | null {
+  const normalizedId = sessionId.replace(/^codex:/, '')
+  const codexDir = join(homedir(), '.codex')
+  const files = [
+    ...collectJsonlFiles(join(codexDir, 'sessions')),
+    ...collectJsonlFiles(join(codexDir, 'archived_sessions'))
+  ]
+  return files.find((file) => codexSessionIdFromFile(file) === normalizedId) || null
+}
+
+function parseCodexSessionFile(filePath: string): Session | null {
+  let lines: string[] = []
+  try {
+    lines = readFileSync(filePath, 'utf-8').trim().split('\n').filter(Boolean)
+  } catch {
+    return null
+  }
+  if (!lines.length) return null
+
+  const sessionId = codexSessionIdFromFile(filePath)
+  const parsedMessages: ParsedMessage[] = []
+  let projectPath = ''
+  let projectName = 'codex'
+  let firstPrompt = ''
+  let lastPrompt = ''
+  let promptCount = 0
+  let startTime: Date | null = null
+  let endTime: Date | null = null
+  let totalInputTokens = 0
+  let totalOutputTokens = 0
+  let totalCacheTokens = 0
+  let totalTokens = 0
+  let toolCallCount = 0
+  let bashCallCount = 0
+  let linesAdded = 0
+  let linesRemoved = 0
+  let hasError = false
+
+  for (const line of lines) {
+    let event: CodexLogEvent
+    try {
+      event = JSON.parse(line) as CodexLogEvent
+    } catch {
+      continue
+    }
+
+    if (event.timestamp) {
+      const ts = new Date(event.timestamp)
+      if (!isNaN(ts.getTime())) {
+        if (!startTime || ts < startTime) startTime = ts
+        if (!endTime || ts > endTime) endTime = ts
+      }
+    }
+
+    if (event.type === 'session_meta' && event.payload) {
+      if (typeof event.payload.cwd === 'string' && event.payload.cwd.trim()) {
+        projectPath = event.payload.cwd
+        projectName = basename(projectPath) || projectPath
+      }
+      if (event.payload.timestamp) {
+        const ts = new Date(event.payload.timestamp)
+        if (!isNaN(ts.getTime())) {
+          if (!startTime || ts < startTime) startTime = ts
+        }
+      }
+      continue
+    }
+
+    if (event.type === 'response_item' && event.payload?.type === 'message') {
+      const role = event.payload.role
+      const text = extractCodexContent(event.payload.content)
+      if (role === 'user' && isCodexUserPrompt(text)) {
+        promptCount++
+        const truncated = text.substring(0, 300)
+        if (!firstPrompt) firstPrompt = truncated
+        lastPrompt = truncated
+        parsedMessages.push({
+          role: 'user',
+          content: text,
+          timestamp: event.timestamp
+        })
+      } else if (role === 'assistant' && text.trim()) {
+        parsedMessages.push({
+          role: 'assistant',
+          content: text,
+          timestamp: event.timestamp
+        })
+      }
+    } else if (
+      event.type === 'response_item' &&
+      (event.payload?.type === 'function_call' || event.payload?.type === 'custom_tool_call')
+    ) {
+      toolCallCount++
+      const toolName = event.payload.name || 'tool'
+      if (toolName === 'exec_command') bashCallCount++
+      parsedMessages.push({
+        role: 'assistant',
+        content: `[Tool: ${toolName}]`,
+        timestamp: event.timestamp,
+        isToolCall: true,
+        toolName
+      })
+
+      const patchText = event.payload.input || ''
+      if (toolName === 'apply_patch' && patchText) {
+        for (const patchLine of patchText.split('\n')) {
+          if (patchLine.startsWith('+') && !patchLine.startsWith('+++')) linesAdded++
+          if (patchLine.startsWith('-') && !patchLine.startsWith('---')) linesRemoved++
+        }
+      }
+    } else if (event.type === 'event_msg' && event.payload?.type === 'agent_message') {
+      const text = typeof event.payload.message === 'string' ? event.payload.message.trim() : ''
+      if (text) {
+        parsedMessages.push({
+          role: 'assistant',
+          content: text,
+          timestamp: event.timestamp
+        })
+      }
+    } else if (event.type === 'event_msg' && event.payload?.type === 'token_count') {
+      const usage = event.payload.info?.total_token_usage
+      const lastUsage = event.payload.info?.last_token_usage
+      if (usage) {
+        totalInputTokens = Math.max(totalInputTokens, usage.input_tokens || 0)
+        totalOutputTokens = Math.max(totalOutputTokens, usage.output_tokens || 0)
+        totalCacheTokens = Math.max(totalCacheTokens, usage.cached_input_tokens || 0)
+        totalTokens = Math.max(totalTokens, usage.total_tokens || 0)
+      }
+      if (lastUsage && !usage) {
+        totalInputTokens += lastUsage.input_tokens || 0
+        totalOutputTokens += lastUsage.output_tokens || 0
+        totalCacheTokens += lastUsage.cached_input_tokens || 0
+        totalTokens += lastUsage.total_tokens || 0
+      }
+    } else if (event.type === 'error') {
+      hasError = true
+    }
+  }
+
+  if (!projectPath) {
+    projectPath = 'Codex'
+    projectName = 'Codex'
+  }
+  if (!startTime) startTime = new Date(statSync(filePath).mtime)
+  if (!endTime) endTime = startTime
+
+  if (promptCount === 0 && parsedMessages.length === 0) return null
+
+  return {
+    id: `codex:${sessionId}`,
+    source: 'codex',
+    projectPath,
+    projectName,
+    startTime: startTime.toISOString(),
+    endTime: endTime.toISOString(),
+    firstPrompt: firstPrompt || '(no prompts)',
+    lastPrompt: lastPrompt || firstPrompt || '(no prompts)',
+    promptCount,
+    totalTokens: totalTokens || totalInputTokens + totalOutputTokens,
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    cacheTokens: totalCacheTokens,
+    status: hasError ? 'error' : promptCount > 15 ? 'debug' : 'success',
+    linesAdded,
+    linesRemoved,
+    messages: parsedMessages
+  }
+}
+
+function parseCodexSessions(): { sessions: Session[]; projects: ProjectStats[] } {
+  const codexDir = join(homedir(), '.codex')
+  const files = [
+    ...collectJsonlFiles(join(codexDir, 'sessions')),
+    ...collectJsonlFiles(join(codexDir, 'archived_sessions'))
+  ]
+  const seen = new Set<string>()
+  const sessions: Session[] = []
+  const projectMap = new Map<string, ProjectStats>()
+
+  for (const file of files) {
+    const id = codexSessionIdFromFile(file)
+    if (seen.has(id)) continue
+    seen.add(id)
+
+    const session = parseCodexSessionFile(file)
+    if (!session || session.status !== 'success') continue
+    sessions.push(session)
+
+    const pKey = projectKey('codex', session.projectPath)
+    const existing = projectMap.get(pKey) || {
+      name: session.projectName,
+      path: session.projectPath,
+      source: 'codex',
+      totalTokens: 0,
+      sessionCount: 0,
+      promptCount: 0,
+      lastActive: session.endTime,
+      toolCallCount: 0,
+      bashCallCount: 0,
+      toolDensity: 0,
+      bashRatio: 0
+    }
+    existing.totalTokens += session.totalTokens
+    existing.sessionCount++
+    existing.promptCount += session.promptCount
+    existing.toolCallCount += session.messages?.filter((m) => m.isToolCall).length || 0
+    existing.bashCallCount += session.messages?.filter((m) => m.toolName === 'exec_command').length || 0
+    if (session.endTime > existing.lastActive) existing.lastActive = session.endTime
+    projectMap.set(pKey, existing)
+  }
+
+  const projects = Array.from(projectMap.values())
+  for (const p of projects) {
+    p.toolDensity = p.promptCount > 0 ? p.toolCallCount / p.promptCount : 0
+    p.bashRatio = p.toolCallCount > 0 ? p.bashCallCount / p.toolCallCount : 0
+  }
+  return { sessions, projects }
 }
 
 function parseTraeSessions(): { sessions: Session[]; projects: ProjectStats[] } {
@@ -300,13 +615,16 @@ function countLinesFromMessages(messages: RawMessage[]): { added: number; remove
 export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectStats[] } {
   const claudeDir = join(homedir(), '.claude', 'projects')
   const traeData = parseTraeSessions()
+  const codexData = parseCodexSessions()
 
   if (!existsSync(claudeDir)) {
+    const sessions = [...traeData.sessions, ...codexData.sessions]
+    const projects = [...traeData.projects, ...codexData.projects]
     return {
-      sessions: traeData.sessions.sort(
+      sessions: sessions.sort(
         (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
       ),
-      projects: traeData.projects.sort((a, b) => b.totalTokens - a.totalTokens)
+      projects: projects.sort((a, b) => b.totalTokens - a.totalTokens)
     }
   }
 
@@ -323,11 +641,13 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
       }
     })
   } catch {
+    const sessions = [...traeData.sessions, ...codexData.sessions]
+    const projects = [...traeData.projects, ...codexData.projects]
     return {
-      sessions: traeData.sessions.sort(
+      sessions: sessions.sort(
         (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
       ),
-      projects: traeData.projects.sort((a, b) => b.totalTokens - a.totalTokens)
+      projects: projects.sort((a, b) => b.totalTokens - a.totalTokens)
     }
   }
 
@@ -510,7 +830,8 @@ export function parseClaudeSessions(): { sessions: Session[]; projects: ProjectS
   }
 
   sessions.push(...traeData.sessions)
-  for (const p of traeData.projects) {
+  sessions.push(...codexData.sessions)
+  for (const p of [...traeData.projects, ...codexData.projects]) {
     const pKey = projectKey(p.source, p.path)
     const existing = projectMap.get(pKey)
     if (existing) {
@@ -541,6 +862,12 @@ export function parseSessionDetail(sessionId: string, projectDirName?: string): 
     const traeSessions = parseTraeSessions().sessions
     const session = traeSessions.find((s) => s.id === sessionId)
     return session?.messages || []
+  }
+
+  if (sessionId.startsWith('codex:')) {
+    const file = findCodexSessionFile(sessionId)
+    if (!file) return []
+    return parseCodexSessionFile(file)?.messages || []
   }
 
   if (!projectDirName) return []

@@ -8,7 +8,8 @@ const SOURCE_CONFIG = {
   trae: {
     label: 'Trae', color: '#4cada5'
   },
-  'trae-cn': { label: 'TraeCN', color: '#acdf2c' }
+  'trae-cn': { label: 'TraeCN', color: '#acdf2c' },
+  codex: { label: 'Codex', color: '#2ec8ff' }
 } as const
 
 function projectSelectionKey(source: ProjectStats['source'] | Session['source'], projectPath: string): string {
@@ -62,6 +63,7 @@ export default function SessionList(): JSX.Element {
   const sourceTabs: Array<{ value: 'ALL' | DataSource; label: string; short: string }> = [
     { value: 'ALL', label: 'ALL', short: 'ALL' },
     { value: 'claude', label: 'Claude', short: 'CLD' },
+    { value: 'codex', label: 'Codex', short: 'CDX' },
     { value: 'trae', label: 'Trae', short: 'TRAE' },
     { value: 'trae-cn', label: 'TraeCN', short: 'TCN' }
   ]

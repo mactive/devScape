@@ -32,13 +32,15 @@ const R_CAP_K = 1.55 // max ring radius = R_CAP_K × sigma
 const SOURCE_COLORS: Record<DataSource, string> = {
   claude: '#5EAB07',
   trae: '#4cada5',
-  'trae-cn': '#acdf2c'
+  'trae-cn': '#acdf2c',
+  codex: '#2ec8ff'
 }
 
 function sourceLabel(source: DataSource): string {
   if (source === 'claude') return 'Claude'
   if (source === 'trae') return 'Trae'
-  return 'TraeCN'
+  if (source === 'trae-cn') return 'TraeCN'
+  return 'Codex'
 }
 
 function projectSelectionKey(source: DataSource, projectPath: string): string {
@@ -123,7 +125,7 @@ function buildMountains(
   projects: ProjectStats[], sessions: Session[], dr: DateRange, activeProjectKey?: string | null
 ): Mountain[] {
   if (!projects.length) return []
-  const sourcePriority: Record<DataSource, number> = { claude: 0, 'trae-cn': 1, trae: 2 }
+  const sourcePriority: Record<DataSource, number> = { claude: 0, codex: 1, 'trae-cn': 2, trae: 3 }
 
   const firstTime = new Map<string, number>()
   for (const s of sessions) {
@@ -1377,6 +1379,7 @@ export default function TerrainView(): JSX.Element {
         <span><span style={{ color: '#aaff00' }}>Z</span>=hour</span>
         <span><span style={{ color: '#aaff00' }}>↑</span>=prompts</span>
         <span><span style={{ color: SOURCE_COLORS.claude }}>●</span>={sourceLabel('claude')}</span>
+        <span><span style={{ color: SOURCE_COLORS.codex }}>●</span>={sourceLabel('codex')}</span>
         <span><span style={{ color: SOURCE_COLORS.trae }}>●</span>={sourceLabel('trae')}</span>
         <span><span style={{ color: SOURCE_COLORS['trae-cn'] }}>●</span>={sourceLabel('trae-cn')}</span>
         <span><span style={{ color: '#88ddff' }}>●</span>=tool density</span>
